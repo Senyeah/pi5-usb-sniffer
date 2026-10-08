@@ -1,0 +1,39 @@
+{
+    "control": {
+        "modify": [],
+        "ignore": [
+            {
+                "enable": true,
+                "bRequestType": 40,
+                "bRequest": 40,
+                "wValue": -1,
+                "wIndex": -1,
+                "wLength": 0,
+                "content_pattern": []
+            }
+        ],
+        "stall": [
+            {
+                "enable": true,
+                "bRequestType": -1,
+                "bRequest": 52,
+                "wValue": -1,
+                "wIndex": -1,
+                "wLength": 1,
+                "content_pattern": []
+            },
+            {
+                "enable": true,
+                "bRequestType": 21,
+                "bRequest": 9,
+                "wValue": -1,
+                "wIndex": 2,
+                "wLength": 1,
+                "content_pattern": []
+            }
+        ]
+    },
+    "int": [],
+    "bulk": [],
+    "isoc": []
+}

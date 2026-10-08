@@ -1,0 +1,55 @@
+diff --git a/host-raw-gadget.cpp b/host-raw-gadget.cpp
+index c7e9c66..f50a237 100644
+--- a/host-raw-gadget.cpp
++++ b/host-raw-gadget.cpp
+@@ -125,8 +125,10 @@ int usb_raw_ep_read(int fd, struct usb_raw_ep_io *io) {
+ 			// data overrun returns EOVERFLOW).
+ 			return rv;
+ 		}
+-		else if (errno == EBUSY)
++		else if (errno == EBUSY || errno == EAGAIN) {
++			// EAGAIN: the host suspended the bus.
+ 			return rv;
++		}
+ 		perror("ioctl(USB_RAW_IOCTL_EP_READ)");
+ 		exit(EXIT_FAILURE);
+ 	}
+@@ -155,8 +157,10 @@ int usb_raw_ep_write(int fd, struct usb_raw_ep_io *io) {
+ 			// data overrun returns EOVERFLOW).
+ 			return rv;
+ 		}
+-		else if (errno == EBUSY)
++		else if (errno == EBUSY || errno == EAGAIN) {
++			// EAGAIN: the host suspended the bus.
+ 			return rv;
++		}
+ 		perror("ioctl(USB_RAW_IOCTL_EP_WRITE)");
+ 		exit(EXIT_FAILURE);
+ 	}
+diff --git a/proxy.cpp b/proxy.cpp
+index bafa47e..e262aad 100644
+--- a/proxy.cpp
++++ b/proxy.cpp
+@@ -701,6 +701,11 @@ void *ep_loop_write(void *arg) {
+ 
+ 		if (ep.bEndpointAddress & USB_DIR_IN) {
+ 			int rv = usb_raw_ep_write(fd, (struct usb_raw_ep_io *)&io);
++			// Bus suspended: keep the data and retry until the host resumes.
++			while (rv < 0 && errno == EAGAIN) {
++				usleep(10000);
++				rv = usb_raw_ep_write(fd, (struct usb_raw_ep_io *)&io);
++			}
+ 			if (rv < 0 && errno == ESHUTDOWN) {
+ 				printf("EP%x(%s_%s): device likely reset, stopping thread\n",
+ 					ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
+@@ -893,6 +898,10 @@ void *ep_loop_read(void *arg) {
+ 				io.inner.length = sizeof(io.data);
+ 
+ 			int rv = usb_raw_ep_read(fd, (struct usb_raw_ep_io *)&io);
++			if (rv < 0 && errno == EAGAIN) {
++				usleep(10000);
++				continue;
++			}
+ 			if (rv < 0 && errno == ESHUTDOWN) {
+ 				printf("EP%x(%s_%s): device likely reset, stopping thread\n",
+ 					ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());

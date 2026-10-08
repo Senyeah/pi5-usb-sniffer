@@ -1,0 +1,136 @@
+diff --git a/proxy.cpp b/proxy.cpp
+index fbbfb3d..42c9aff 100644
+--- a/proxy.cpp
++++ b/proxy.cpp
+@@ -6,6 +6,70 @@
+ #include "host-raw-gadget.h"
+ #include "device-libusb.h"
+ #include "misc.h"
++#include <fstream>
++#include <glob.h>
++
++extern enum usb_device_speed device_speed;
++
++// A full-speed host must see a high-speed device's other-speed descriptors.
++static bool host_link_is_full_speed() {
++	glob_t g;
++	bool fs = false;
++	if (glob("/sys/class/udc/*/current_speed", 0, NULL, &g) == 0 && g.gl_pathc > 0) {
++		std::ifstream f(g.gl_pathv[0]);
++		std::string speed;
++		f >> speed;
++		fs = (speed == "full-speed");
++	}
++	globfree(&g);
++	return fs;
++}
++
++static bool serve_other_speed() {
++	return device_speed == USB_SPEED_HIGH && host_link_is_full_speed();
++}
++
++// (config index, interface, alt, device endpoint) -> (wMaxPacketSize, bInterval) at full speed
++static std::map<uint32_t, std::pair<uint16_t, uint8_t>> fs_endpoint_params;
++
++static uint32_t fs_key(uint8_t config_index, uint8_t interface, uint8_t alt, uint8_t ep) {
++	return ((uint32_t)config_index << 24) | ((uint32_t)interface << 16) | ((uint32_t)alt << 8) | ep;
++}
++
++void fetch_other_speed_descriptors() {
++	for (int i = 0; i < device_device_desc.bNumConfigurations; i++) {
++		unsigned char buf[1024];
++		unsigned char *p = buf;
++		int nbytes = 0;
++		struct usb_ctrlrequest req = {
++			.bRequestType = USB_DIR_IN,
++			.bRequest = USB_REQ_GET_DESCRIPTOR,
++			.wValue = (__le16)((USB_DT_OTHER_SPEED_CONFIG << 8) | i),
++			.wIndex = 0,
++			.wLength = sizeof(buf),
++		};
++		if (control_request(&req, &nbytes, &p, USB_REQUEST_TIMEOUT) != 0 || nbytes < 9) {
++			printf("No other-speed descriptor for config index %d\n", i);
++			continue;
++		}
++		uint8_t iface = 0, alt = 0;
++		for (int off = 0; off + 2 <= nbytes; ) {
++			uint8_t len = buf[off], type = buf[off + 1];
++			if (len < 2 || off + len > nbytes)
++				break;
++			if (type == USB_DT_INTERFACE && len >= 4) {
++				iface = buf[off + 2];
++				alt = buf[off + 3];
++			}
++			if (type == USB_DT_ENDPOINT && len >= 7) {
++				uint16_t maxp = buf[off + 4] | (buf[off + 5] << 8);
++				fs_endpoint_params[fs_key(i, iface, alt, buf[off + 2])] = {maxp, buf[off + 6]};
++			}
++			off += len;
++		}
++		printf("Other-speed descriptor for config index %d: %d bytes\n", i, nbytes);
++	}
++}
+ 
+ #ifdef HAVE_LUA
+ extern "C" {
+@@ -1007,6 +1071,16 @@ void process_eps(int fd, int config, int interface, int altsetting) {
+ 		else
+ 			ep->thread_info.dir = "out";
+ 
++		if (serve_other_speed()) {
++			auto it = fs_endpoint_params.find(fs_key(config, alt->interface.bInterfaceNumber,
++				alt->interface.bAlternateSetting, ep->device_bEndpointAddress));
++			if (it != fs_endpoint_params.end()) {
++				ep->thread_info.endpoint.wMaxPacketSize = it->second.first;
++				ep->thread_info.endpoint.bInterval = it->second.second;
++				printf("EP%02x: full-speed host, using other-speed maxpacket=%u interval=%u\n",
++					ep->endpoint.bEndpointAddress, it->second.first, it->second.second);
++			}
++		}
+ 		ep->thread_info.ep_num = usb_raw_ep_enable(fd, &ep->thread_info.endpoint);
+ 		printf("%s_%s: addr = %u, ep = #%d\n",
+ 			ep->thread_info.transfer_type.c_str(),
+@@ -1162,10 +1236,24 @@ void ep0_loop(int fd) {
+ 				delete[] control_data;
+ 				continue;
+ 			}
++			// Full-speed host: fetch the other-speed descriptor and present it as the type the host asked for.
++			bool swap_speed_desc = false;
++			if ((event.ctrl.bRequestType & USB_TYPE_MASK) == USB_TYPE_STANDARD &&
++			    event.ctrl.bRequest == USB_REQ_GET_DESCRIPTOR && serve_other_speed()) {
++				uint8_t type = event.ctrl.wValue >> 8;
++				if (type == USB_DT_CONFIG || type == USB_DT_OTHER_SPEED_CONFIG) {
++					event.ctrl.wValue ^= (USB_DT_CONFIG ^ USB_DT_OTHER_SPEED_CONFIG) << 8;
++					swap_speed_desc = true;
++				}
++			}
+ 			result = control_request(&event.ctrl, &nbytes, &control_data, USB_REQUEST_TIMEOUT);
++			if (swap_speed_desc)
++				event.ctrl.wValue ^= (USB_DT_CONFIG ^ USB_DT_OTHER_SPEED_CONFIG) << 8;
+ 			if (result == 0) {
+ 				memcpy(&io.data[0], control_data, nbytes);
+ 				io.inner.length = nbytes;
++				if (swap_speed_desc && nbytes >= 2)
++					io.data[1] = event.ctrl.wValue >> 8;
+ 
+ 				if (injection_enabled) {
+ 					injection(event, io, injection_flags);
+diff --git a/proxy.h b/proxy.h
+index 98c0039..2519b39 100644
+--- a/proxy.h
++++ b/proxy.h
+@@ -1 +1,2 @@
+ void ep0_loop(int fd);
++void fetch_other_speed_descriptors();
+diff --git a/usb-proxy.cpp b/usb-proxy.cpp
+index f2fdaac..7451019 100644
+--- a/usb-proxy.cpp
++++ b/usb-proxy.cpp
+@@ -615,6 +615,7 @@ int main(int argc, char **argv)
+ 	}
+ 
+ 	setup_host_usb_desc();
++	fetch_other_speed_descriptors();
+ 	printf("Setup USB config successfully\n");
+ 
+ 	int fd = usb_raw_open();

@@ -1,0 +1,86 @@
+diff --git a/proxy.cpp b/proxy.cpp
+index bafa47e..11209bd 100644
+--- a/proxy.cpp
++++ b/proxy.cpp
+@@ -1,4 +1,5 @@
+ #include <vector>
++#include <cstring>
+ #include <algorithm>
+ #include <map>
+ 
+@@ -591,6 +592,34 @@ static bool apply_injection_pipeline(struct usb_raw_transfer_io &io,
+ 
+ // ─────────────────────────────────────────────────────────────────────────────
+ 
++// A rule field of -1 matches any value.
++static bool control_rule_matches(const Json::Value &rule, const struct usb_ctrlrequest &ctrl) {
++	auto mismatch = [&rule](const char *key, int actual) {
++		int want = rule[key].asInt();
++		return want != -1 && actual != hexToDecimal(want);
++	};
++	return !(mismatch("bRequestType", ctrl.bRequestType) ||
++		 mismatch("bRequest", ctrl.bRequest) ||
++		 mismatch("wValue", ctrl.wValue) ||
++		 mismatch("wIndex", ctrl.wIndex) ||
++		 mismatch("wLength", ctrl.wLength));
++}
++
++// Ignore and stall rules are checked before a request is forwarded, so the device never sees it.
++int control_block_flags(const struct usb_ctrlrequest &ctrl) {
++	for (const char *type : {"ignore", "stall"}) {
++		for (unsigned int j = 0; j < injection_config["control"][type].size(); j++) {
++			Json::Value rule = injection_config["control"][type][j];
++			if (!rule["enable"].asBool() || !control_rule_matches(rule, ctrl))
++				continue;
++			printf("Matched injection rule: %s, index: %d (bRequestType 0x%02x bRequest 0x%02x wValue 0x%04x wIndex 0x%04x wLength %u)\n",
++			       type, j, ctrl.bRequestType, ctrl.bRequest, ctrl.wValue, ctrl.wIndex, ctrl.wLength);
++			return strcmp(type, "ignore") == 0 ? USB_INJECTION_FLAG_IGNORE : USB_INJECTION_FLAG_STALL;
++		}
++	}
++	return USB_INJECTION_FLAG_NONE;
++}
++
+ void injection(struct usb_raw_control_event &event, struct usb_raw_transfer_io &io, int &injection_flags) {
+ 	const std::vector<std::string> injection_type{"modify", "ignore", "stall"};
+ 
+@@ -600,11 +629,7 @@ void injection(struct usb_raw_control_event &event, struct usb_raw_transfer_io &
+ 			if (!rule["enable"].asBool())
+ 				continue;
+ 
+-			if (event.ctrl.bRequestType != hexToDecimal(rule["bRequestType"].asInt()) ||
+-			    event.ctrl.bRequest     != hexToDecimal(rule["bRequest"].asInt()) ||
+-			    event.ctrl.wValue       != hexToDecimal(rule["wValue"].asInt()) ||
+-			    event.ctrl.wIndex       != hexToDecimal(rule["wIndex"].asInt()) ||
+-			    event.ctrl.wLength      != hexToDecimal(rule["wLength"].asInt()))
++			if (!control_rule_matches(rule, event.ctrl))
+ 				continue;
+ 
+ 			printf("Matched injection rule: %s, index: %d\n", injection_type[i].c_str(), j);
+@@ -1116,6 +1141,18 @@ void ep0_loop(int fd) {
+ 
+ 		int rv = -1;
+ 		if (event.ctrl.bRequestType & USB_DIR_IN) {
++			int block = injection_enabled ? control_block_flags(event.ctrl) : USB_INJECTION_FLAG_NONE;
++			if (block == USB_INJECTION_FLAG_STALL) {
++				delete[] control_data;
++				usb_raw_ep0_stall(fd);
++				continue;
++			}
++			if (block == USB_INJECTION_FLAG_IGNORE) {
++				io.inner.length = 0;
++				usb_raw_ep0_write(fd, (struct usb_raw_ep_io *)&io);
++				delete[] control_data;
++				continue;
++			}
+ 			result = control_request(&event.ctrl, &nbytes, &control_data, USB_REQUEST_TIMEOUT);
+ 			if (result == 0) {
+ 				memcpy(&io.data[0], control_data, nbytes);
+@@ -1302,6 +1339,8 @@ void ep0_loop(int fd) {
+ 					case USB_INJECTION_FLAG_NONE:
+ 						break;
+ 					case USB_INJECTION_FLAG_IGNORE:
++						// Ack without forwarding, so the host sees success.
++						usb_raw_ep0_read(fd, (struct usb_raw_ep_io *)&io);
+ 						delete[] control_data;
+ 						continue;
+ 					case USB_INJECTION_FLAG_STALL:

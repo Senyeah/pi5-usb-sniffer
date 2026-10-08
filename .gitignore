@@ -1,0 +1,8 @@
+# Captures and decoder output hold private data (README.md section 10).
+sessions/
+
+.DS_Store
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/

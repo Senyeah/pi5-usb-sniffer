@@ -1,0 +1,13 @@
+diff --git a/device-libusb.cpp b/device-libusb.cpp
+index c8fe927..08077ba 100644
+--- a/device-libusb.cpp
++++ b/device-libusb.cpp
+@@ -194,6 +194,8 @@ void set_configuration(int configuration) {
+ }
+ 
+ void claim_interface(int interface) {
++	// The kernel binds usbhid and snd-usb-audio after SET_CONFIGURATION. Remove them first.
++	libusb_detach_kernel_driver(dev_handle, interface);
+ 	int result = libusb_claim_interface(dev_handle, interface);
+ 	if (result != LIBUSB_SUCCESS) {
+ 		fprintf(stderr, "Error claiming interface(%d): %s\n",

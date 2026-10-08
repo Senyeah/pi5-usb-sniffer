@@ -1,0 +1,244 @@
+diff --git a/proxy.cpp b/proxy.cpp
+index 942b704..48a0f4c 100644
+--- a/proxy.cpp
++++ b/proxy.cpp
+@@ -41,6 +41,149 @@ static bool serve_other_speed() {
+ // (config index, interface, alt, device endpoint) -> (wMaxPacketSize, bInterval) at full speed
+ static std::map<uint32_t, std::pair<uint16_t, uint8_t>> fs_endpoint_params;
+ 
++// Apple iAP over HID: one report table per bus speed. The count includes the link control byte (LCB)
++// but not the report ID. LCB bit 0 = continuation, bit 1 = more to follow. A receiver joins the
++// fragments end to end, so only the last fragment of a packet may carry padding.
++#include <vector>
++struct hid_report_size { uint8_t id; uint16_t count; };
++static const hid_report_size apple_hs_in[]  = {{0x01,5},{0x02,9},{0x03,13},{0x04,17},{0x05,25},{0x06,49},
++					       {0x07,95},{0x08,193},{0x09,257},{0x0a,385},{0x0b,513},{0x0c,767}};
++static const hid_report_size apple_hs_out[] = {{0x0d,5},{0x0e,9},{0x0f,13},{0x10,17},{0x11,25},{0x12,49},
++					       {0x13,95},{0x14,193},{0x15,255}};
++static const hid_report_size apple_fs_in[]  = {{0x01,12},{0x02,14},{0x03,20},{0x04,63}};
++static const hid_report_size apple_fs_out[] = {{0x05,8},{0x06,10},{0x07,14},{0x08,20},{0x09,63}};
++static const unsigned char apple_fs_hid_report_desc[96] = {
++	0x06,0x00,0xff,0x09,0x01,0xa1,0x01,0x75,0x08,0x26,0x80,0x00,0x15,0x00,
++	0x09,0x01,0x85,0x01,0x95,0x0c,0x82,0x02,0x01, 0x09,0x01,0x85,0x02,0x95,0x0e,0x82,0x02,0x01,
++	0x09,0x01,0x85,0x03,0x95,0x14,0x82,0x02,0x01, 0x09,0x01,0x85,0x04,0x95,0x3f,0x82,0x02,0x01,
++	0x09,0x01,0x85,0x05,0x95,0x08,0x92,0x02,0x01, 0x09,0x01,0x85,0x06,0x95,0x0a,0x92,0x02,0x01,
++	0x09,0x01,0x85,0x07,0x95,0x0e,0x92,0x02,0x01, 0x09,0x01,0x85,0x08,0x95,0x14,0x92,0x02,0x01,
++	0x09,0x01,0x85,0x09,0x95,0x3f,0x92,0x02,0x01, 0xc0};
++static bool apple_hid_tables = false;        // the device's HID class descriptors say 96 (FS) and 208 (HS)
++static std::set<uint8_t> hid_in_eps;         // device addresses of HID interrupt IN endpoints
++static std::vector<unsigned char> host_pkt;  // iAP packet being reassembled from the host's reports
++static std::vector<unsigned char> dev_pkt;   // iAP packet being reassembled from the device's reports
++
++static bool apple_hid_translate() { return apple_hid_tables && serve_other_speed(); }
++
++static const hid_report_size &pick_report(const hid_report_size *t, size_t n, size_t count) {
++	for (size_t i = 0; i < n; i++)
++		if (t[i].count >= count)
++			return t[i];
++	return t[n - 1];
++}
++static int report_count(const hid_report_size *t, size_t n, uint8_t id) {
++	for (size_t i = 0; i < n; i++)
++		if (t[i].id == id)
++			return t[i].count;
++	return -1;
++}
++// Length of an iAP packet from its header: 55 len ... csum, or 55 00 len16 ... csum. 0 if unknown.
++static size_t iap_packet_length(const std::vector<unsigned char> &p) {
++	if (p.size() < 2 || p[0] != 0x55)
++		return 0;
++	if (p[1] != 0)
++		return (size_t)p[1] + 3;
++	if (p.size() < 4)
++		return 0;
++	return ((size_t)p[2] << 8 | p[3]) + 5;
++}
++// Add one report's payload to a packet. Returns true when the packet is complete.
++static bool iap_add_fragment(std::vector<unsigned char> &pkt, uint8_t lcb, const unsigned char *payload, int len) {
++	if (!(lcb & 0x01))
++		pkt.clear();
++	pkt.insert(pkt.end(), payload, payload + len);
++	if (lcb & 0x02)
++		return false;
++	size_t total = iap_packet_length(pkt);
++	if (total && total < pkt.size())
++		pkt.resize(total);
++	return true;
++}
++static uint8_t iap_lcb(int index, bool last) { return (index ? 0x01 : 0x00) | (last ? 0x00 : 0x02); }
++
++// Host (FS table) SET_REPORT -> device (HS table). Returns true when the request was consumed.
++static bool translate_host_set_report(struct usb_raw_control_event &event, struct usb_raw_transfer_io &io) {
++	uint8_t fs_id = event.ctrl.wValue & 0xff;
++	int cnt = report_count(apple_fs_out, 5, fs_id);
++	if (cnt < 0 || event.ctrl.wLength < 2)
++		return false;
++	int avail = event.ctrl.wLength - 2;
++	int take = avail < cnt - 1 ? avail : cnt - 1;
++	uint8_t lcb = io.data[1];
++	if (!iap_add_fragment(host_pkt, lcb, (unsigned char *)&io.data[2], take)) {
++		printf("ep0: SET_REPORT FS report 0x%02x LCB 0x%02x: buffered %d bytes (%zu so far)\n", fs_id, lcb, take, host_pkt.size());
++		return true;
++	}
++	size_t size = host_pkt.size(), off = 0;
++	int n = 0;
++	do {
++		size_t remaining = size - off;
++		bool last = remaining <= 254;
++		const hid_report_size &r = last ? pick_report(apple_hs_out, 9, remaining + 1) : apple_hs_out[8];
++		size_t chunk = last ? remaining : 254;
++		unsigned char buf[256];
++		memset(buf, 0, sizeof(buf));
++		buf[0] = r.id;
++		buf[1] = iap_lcb(n, last);
++		memcpy(&buf[2], host_pkt.data() + off, chunk);
++		struct usb_ctrlrequest req = {
++			.bRequestType = 0x21,
++			.bRequest = 0x09,
++			.wValue = (__le16)(0x0200 | r.id),
++			.wIndex = event.ctrl.wIndex,
++			.wLength = (__le16)(r.count + 1),
++		};
++		unsigned char *p = buf;
++		int nb = 0;
++		int res = control_request(&req, &nb, &p, USB_REQUEST_TIMEOUT);
++		printf("ep0: iAP packet %zu bytes from FS report 0x%02x -> HS report 0x%02x (%u bytes) LCB 0x%02x: %s\n",
++		       size, fs_id, r.id, r.count + 1, buf[1], res == 0 ? "ok" : "error");
++		off += chunk;
++		n++;
++	} while (off < size);
++	host_pkt.clear();
++	return true;
++}
++
++// Device (HS table) input report -> host (FS table) input reports.
++static void enqueue_fs_hid_reports(const unsigned char *data, int nbytes, int ep_num,
++				   std::deque<usb_raw_transfer_io> *q, std::mutex *m, uint8_t ep_addr) {
++	int cnt = report_count(apple_hs_in, 12, data[0]);
++	int avail = nbytes - 2;
++	int take = (cnt > 0 && avail > cnt - 1) ? cnt - 1 : avail;
++	uint8_t lcb = data[1];
++	if (!iap_add_fragment(dev_pkt, lcb, data + 2, take)) {
++		printf("EP%x(int_in): HID report 0x%02x LCB 0x%02x: buffered %d bytes (%zu so far)\n", ep_addr, data[0], lcb, take, dev_pkt.size());
++		return;
++	}
++	const size_t fs_max = apple_fs_in[3].count - 1;
++	size_t size = dev_pkt.size(), off = 0;
++	int n = 0;
++	do {
++		size_t remaining = size - off;
++		bool last = remaining <= fs_max;
++		const hid_report_size &r = last ? pick_report(apple_fs_in, 4, remaining + 1) : apple_fs_in[3];
++		size_t chunk = last ? remaining : fs_max;
++		struct usb_raw_transfer_io io;
++		memset(&io, 0, sizeof(io));
++		io.inner.ep = ep_num;
++		io.inner.flags = 0;
++		io.inner.length = r.count + 1;
++		io.data[0] = r.id;
++		io.data[1] = iap_lcb(n, last);
++		memcpy(&io.data[2], dev_pkt.data() + off, chunk);
++		m->lock();
++		q->push_back(io);
++		m->unlock();
++		printf("EP%x(int_in): iAP packet %zu bytes from HS report 0x%02x -> FS report 0x%02x (%u bytes) LCB 0x%02x\n",
++		       ep_addr, size, data[0], r.id, r.count + 1, io.data[1]);
++		off += chunk;
++		n++;
++	} while (off < size);
++	dev_pkt.clear();
++}
++
+ static uint32_t fs_key(uint8_t config_index, uint8_t interface, uint8_t alt, uint8_t ep) {
+ 	return ((uint32_t)config_index << 24) | ((uint32_t)interface << 16) | ((uint32_t)alt << 8) | ep;
+ }
+@@ -77,6 +220,36 @@ void fetch_other_speed_descriptors() {
+ 			off += len;
+ 		}
+ 		printf("Other-speed descriptor for config index %d: %d bytes\n", i, nbytes);
++
++		int fs_hid_len = -1, hs_hid_len = -1;
++		for (int off = 0; off + 2 <= nbytes; ) {
++			uint8_t len = buf[off], type = buf[off + 1];
++			if (len < 2 || off + len > nbytes) break;
++			if (type == 0x21 && len >= 9) fs_hid_len = buf[off + 7] | (buf[off + 8] << 8);
++			off += len;
++		}
++		unsigned char hs[1024];
++		unsigned char *hp = hs;
++		int hn = 0;
++		struct usb_ctrlrequest hreq = {
++			.bRequestType = USB_DIR_IN,
++			.bRequest = USB_REQ_GET_DESCRIPTOR,
++			.wValue = (__le16)((USB_DT_CONFIG << 8) | i),
++			.wIndex = 0,
++			.wLength = sizeof(hs),
++		};
++		if (control_request(&hreq, &hn, &hp, USB_REQUEST_TIMEOUT) == 0) {
++			for (int off = 0; off + 2 <= hn; ) {
++				uint8_t len = hs[off], type = hs[off + 1];
++				if (len < 2 || off + len > hn) break;
++				if (type == 0x21 && len >= 9) hs_hid_len = hs[off + 7] | (hs[off + 8] << 8);
++				off += len;
++			}
++		}
++		if (fs_hid_len == 96 && hs_hid_len == 208) {
++			apple_hid_tables = true;
++			printf("Apple iAP HID tables detected (FS 96 / HS 208 bytes): report translation enabled for full-speed hosts\n");
++		}
+ 	}
+ }
+ 
+@@ -962,7 +1135,12 @@ void *ep_loop_read(void *arg) {
+ 					break;
+ 				}
+ 
+-				if (nbytes >= 0) {
++				bool is_int = (ep.bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) == USB_ENDPOINT_XFER_INT;
++				if (nbytes >= 2 && apple_hid_translate() && hid_in_eps.count(thread_info.device_bEndpointAddress)) {
++					enqueue_fs_hid_reports(data, nbytes, ep_num, data_queue, data_mutex, ep.bEndpointAddress);
++				}
++				else if (nbytes > 0 || (nbytes == 0 && !is_int)) {
++					// A zero-length interrupt report has no meaning and costs the host a poll.
+ 					memcpy(io.data, data, nbytes);
+ 					io.inner.ep = ep_num;
+ 					io.inner.flags = 0;
+@@ -1095,6 +1273,9 @@ void process_eps(int fd, int config, int interface, int altsetting, bool spawn)
+ 		else
+ 			ep->thread_info.dir = "out";
+ 
++		if (alt->interface.bInterfaceClass == USB_CLASS_HID && usb_endpoint_dir_in(&ep->endpoint) &&
++		    usb_endpoint_type(&ep->endpoint) == USB_ENDPOINT_XFER_INT)
++			hid_in_eps.insert(ep->device_bEndpointAddress);
+ 		if (serve_other_speed()) {
+ 			auto it = fs_endpoint_params.find(fs_key(config, alt->interface.bInterfaceNumber,
+ 				alt->interface.bAlternateSetting, ep->device_bEndpointAddress));
+@@ -1255,6 +1436,16 @@ void ep0_loop(int fd) {
+ 				delete[] control_data;
+ 				continue;
+ 			}
++			if (apple_hid_translate() && event.ctrl.bRequestType == 0x81 &&
++			    event.ctrl.bRequest == USB_REQ_GET_DESCRIPTOR && (event.ctrl.wValue >> 8) == 0x22) {
++				int n = event.ctrl.wLength < sizeof(apple_fs_hid_report_desc) ? event.ctrl.wLength : sizeof(apple_fs_hid_report_desc);
++				memcpy(io.data, apple_fs_hid_report_desc, n);
++				io.inner.length = n;
++				usb_raw_ep0_write(fd, (struct usb_raw_ep_io *)&io);
++				printf("ep0: served the full-speed HID report descriptor (%d bytes)\n", n);
++				delete[] control_data;
++				continue;
++			}
+ 			// Full-speed host: fetch the other-speed descriptor and present it as the type the host asked for.
+ 			bool swap_speed_desc = false;
+ 			if ((event.ctrl.bRequestType & USB_TYPE_MASK) == USB_TYPE_STANDARD &&
+@@ -1528,6 +1719,11 @@ void ep0_loop(int fd) {
+ 						printData(io, 0x00, "control", "out");
+ 
+ 					clamp_uvc_probe_commit(&event.ctrl, io);
++					if (apple_hid_translate() && event.ctrl.bRequestType == 0x21 && event.ctrl.bRequest == 0x09 &&
++					    (event.ctrl.wValue >> 8) == 0x02 && translate_host_set_report(event, io)) {
++						delete[] control_data;
++						continue;
++					}
+ 					memcpy(control_data, io.data, event.ctrl.wLength);
+ 
+ 					result = control_request(&event.ctrl, &nbytes, &control_data, USB_REQUEST_TIMEOUT);

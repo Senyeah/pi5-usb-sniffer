@@ -1,0 +1,109 @@
+diff --git a/proxy.cpp b/proxy.cpp
+index 925b5ee..942b704 100644
+--- a/proxy.cpp
++++ b/proxy.cpp
+@@ -1041,7 +1041,22 @@ void *ep_loop_read(void *arg) {
+ 	return NULL;
+ }
+ 
+-void process_eps(int fd, int config, int interface, int altsetting) {
++static void spawn_ep_threads(struct raw_gadget_endpoint *ep) {
++	if (verbose_level)
++		printf("Creating thread for EP%02x\n", ep->thread_info.endpoint.bEndpointAddress);
++	pthread_create(&ep->thread_read, 0, ep_loop_read, (void *)&ep->thread_info);
++	pthread_create(&ep->thread_write, 0, ep_loop_write, (void *)&ep->thread_info);
++}
++
++void spawn_eps_threads(int config, int interface, int altsetting) {
++	struct raw_gadget_altsetting *alt = &host_device_desc.configs[config]
++					.interfaces[interface].altsettings[altsetting];
++	for (int i = 0; i < alt->interface.bNumEndpoints; i++)
++		spawn_ep_threads(&alt->endpoints[i]);
++}
++
++// spawn=false enables the endpoints only; call spawn_eps_threads() after the device side is ready.
++void process_eps(int fd, int config, int interface, int altsetting, bool spawn) {
+ 	struct raw_gadget_altsetting *alt = &host_device_desc.configs[config]
+ 					.interfaces[interface].altsettings[altsetting];
+ 
+@@ -1096,13 +1111,8 @@ void process_eps(int fd, int config, int interface, int altsetting) {
+ 			ep->thread_info.dir.c_str(),
+ 			addr, ep->thread_info.ep_num);
+ 
+-		if (verbose_level)
+-			printf("Creating thread for EP%02x\n",
+-				ep->thread_info.endpoint.bEndpointAddress);
+-		pthread_create(&ep->thread_read, 0,
+-			ep_loop_read, (void *)&ep->thread_info);
+-		pthread_create(&ep->thread_write, 0,
+-			ep_loop_write, (void *)&ep->thread_info);
++		if (spawn)
++			spawn_ep_threads(ep);
+ 	}
+ 
+ 	printf("process_eps done\n");
+@@ -1342,26 +1352,28 @@ void ep0_loop(int fd) {
+ 				}
+ 
+ 				usb_raw_configure(fd);
+-				set_configuration(config->config.bConfigurationValue);
+ 				host_device_desc.current_config = desired_config;
+ 
++				// The host allows 50 ms for this request. Enable the gadget endpoints and ack first;
++				// a real configuration change on the device takes longer than that.
+ 				for (int i = 0; i < config->config.bNumInterfaces; i++) {
+-					struct raw_gadget_interface *iface = &config->interfaces[i];
+-					iface->current_altsetting = 0;
+-					int interface_num = iface->altsettings[0].interface.bInterfaceNumber;
+-					claim_interface(interface_num);
+-					process_eps(fd, desired_config, i, 0);
+-					usleep(10000); // Give threads time to spawn.
++					config->interfaces[i].current_altsetting = 0;
++					process_eps(fd, desired_config, i, 0, false);
+ 				}
+-
+-				set_configuration_done_once = true;
+-
+-				// Ack request after spawning endpoint threads.
+ 				rv = usb_raw_ep0_read(fd, (struct usb_raw_ep_io *)&io);
+ 				if (rv < 0)
+ 					printf("ep0: ack failed: %d\n", rv);
+ 				else
+ 					printf("ep0: request acked\n");
++
++				set_configuration(config->config.bConfigurationValue);
++				for (int i = 0; i < config->config.bNumInterfaces; i++) {
++					struct raw_gadget_interface *iface = &config->interfaces[i];
++					claim_interface(iface->altsettings[0].interface.bInterfaceNumber);
++					spawn_eps_threads(desired_config, i, 0);
++				}
++
++				set_configuration_done_once = true;
+ 			}
+ 			else if ((event.ctrl.bRequestType & USB_TYPE_MASK) == USB_TYPE_STANDARD &&
+ 					event.ctrl.bRequest == USB_REQ_SET_INTERFACE) {
+@@ -1423,12 +1435,21 @@ void ep0_loop(int fd) {
+ 					printf("Changing interface/altsetting\n");
+ 					terminate_eps(fd, host_device_desc.current_config,
+ 						desired_interface, iface->current_altsetting);
++					// Enable the gadget endpoints and ack within the host's 50 ms, then do the device side.
++					process_eps(fd, host_device_desc.current_config,
++						desired_interface, effective_altsetting, false);
++					iface->current_altsetting = effective_altsetting;
++					rv = usb_raw_ep0_read(fd, (struct usb_raw_ep_io *)&io);
++					if (rv < 0)
++						printf("ep0: ack failed: %d\n", rv);
++					else
++						printf("ep0: request acked\n");
+ 					set_interface_alt_setting(alt->interface.bInterfaceNumber,
+ 						alt->interface.bAlternateSetting);
+-					process_eps(fd, host_device_desc.current_config,
++					spawn_eps_threads(host_device_desc.current_config,
+ 						desired_interface, effective_altsetting);
+-					iface->current_altsetting = effective_altsetting;
+-					usleep(10000); // Give threads time to spawn.
++					delete[] control_data;
++					continue;
+ 				}
+ 
+ 				// Ack request after spawning endpoint threads.

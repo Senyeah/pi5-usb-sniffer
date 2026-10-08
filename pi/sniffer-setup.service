@@ -1,0 +1,15 @@
+[Unit]
+Description=One-time setup for the iAP USB relay
+Wants=network-online.target
+After=network-online.target time-sync.target
+ConditionPathExists=!/var/lib/sniffer/setup-done
+
+[Service]
+Type=oneshot
+ExecStart=/opt/sniffer/pi/setup.sh
+StandardOutput=append:/var/log/sniffer-setup.log
+StandardError=append:/var/log/sniffer-setup.log
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,22 @@
+[project]
+name = "iap-decode"
+version = "0.1.0"
+description = "Decode usbmon captures of iAP1 traffic between an iPhone or iPad and a car stereo"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+iap-decode = "iap_decode.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.10,<0.11"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM"]
