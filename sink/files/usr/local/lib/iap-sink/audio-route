@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Plays the Apple device's USB audio (capture side) on the 3.5 mm jack. Waits for the device and restarts alsaloop when it stops.
+set -u
+
+OUT=${SINK_AUDIO_OUT:-Headphones}
+RATE=${SINK_AUDIO_RATE:-44100}
+LATENCY=${SINK_AUDIO_LATENCY_US:-300000}
+
+apple_card() {
+  local f
+  for f in /proc/asound/card*/usbid; do
+    [ -r "$f" ] || continue
+    case $(<"$f") in
+      05ac:*) f=${f%/usbid}; echo "${f##*card}"; return 0 ;;
+    esac
+  done
+  return 1
+}
+
+while :; do
+  if ! card=$(apple_card); then
+    sleep 1
+    continue
+  fi
+  echo "USB audio card $card -> $OUT at $RATE Hz"
+  # shellcheck disable=SC2086
+  alsaloop -C "hw:$card,0" -P "plughw:CARD=$OUT" -c 2 -f S16_LE -r "$RATE" -t "$LATENCY" -T -1 ${SINK_ALSALOOP_ARGS:-}
+  echo "alsaloop stopped with status $?, retry in 1 s"
+  sleep 1
+done

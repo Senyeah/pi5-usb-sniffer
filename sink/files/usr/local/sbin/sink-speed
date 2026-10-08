@@ -1,0 +1,21 @@
+#!/bin/sh
+# Show or set the USB host speed of the Pi 3. Usage: sink-speed [full|high]. A change needs a reboot.
+f=/boot/firmware/cmdline.txt
+case "${1:-}" in
+  full)
+    grep -q 'dwc_otg.speed=1' "$f" || sed -i '1s/[[:space:]]*$/ dwc_otg.speed=1/' "$f"
+    echo "Full speed (12 Mbit/s) after the next reboot."
+    ;;
+  high)
+    sed -i 's/[[:space:]]*dwc_otg.speed=1//' "$f"
+    echo "High speed (480 Mbit/s) after the next reboot."
+    ;;
+  "")
+    if grep -q 'dwc_otg.speed=1' "$f"; then echo "Set to: full speed"; else echo "Set to: high speed"; fi
+    echo "Onboard hub now: $(cat /sys/bus/usb/devices/1-1/speed 2>/dev/null) Mbit/s (12 = full speed)"
+    ;;
+  *)
+    echo "Usage: sink-speed [full|high]" >&2
+    exit 2
+    ;;
+esac

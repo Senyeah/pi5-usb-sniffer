@@ -1,0 +1,13 @@
+[Unit]
+Description=iAP1 stereo emulator (test sink for the Pi 5 relay)
+After=local-fs.target
+
+[Service]
+EnvironmentFile=-/etc/iap-sink/sink.conf
+ExecStart=/usr/local/bin/iap-sink run
+Restart=always
+RestartSec=2
+StateDirectory=iap-sink
+
+[Install]
+WantedBy=multi-user.target

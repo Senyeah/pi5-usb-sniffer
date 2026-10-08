@@ -1,0 +1,12 @@
+[Unit]
+Description=Play the Apple device's USB audio on the 3.5 mm jack
+After=sound.target
+
+[Service]
+EnvironmentFile=-/etc/iap-sink/sink.conf
+ExecStart=/usr/local/lib/iap-sink/audio-route
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

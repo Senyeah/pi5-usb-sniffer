@@ -82,10 +82,11 @@ pi5-usb-sniffer/
 │   ├── sniffer-setup.service # first-boot unit that runs setup.sh once
 │   ├── setup.sh              # packages, raw_gadget (DKMS), usb-proxy build with patches, system config
 │   ├── capture.sh            # installed as /usr/local/bin/capture
-│   ├── patches/              # usb-proxy-01 … -08, applied in name order
+│   ├── patches/              # usb-proxy-01 … -09, applied in name order
 │   └── rules/
 │       ├── apple-vendor-rules.json  # usb-proxy injection rules: ignore and stall
 │       └── config.json              # usb-proxy options file
+├── sink/                     # Pi 3 B test sink: plays the car stereo for the relay, see sink/README.md
 ├── decode/                   # Python decoder, a uv project
 │   ├── pyproject.toml
 │   ├── uv.lock
@@ -143,6 +144,7 @@ Upstream `usb-proxy` could not relay this device to this stereo. Each patch fixe
 | `06-ack-before-device-work` (R13) | A standard request with no data must complete within 50 ms. `SET_CONFIGURATION` on the real device takes about 54 ms. The patch enables the gadget endpoints and acks first, then configures the device and starts the endpoint threads. `SET_INTERFACE` uses the same order. |
 | `07-apple-hid-fs-tables` (R14) | The Apple device has a different HID report table at each speed. At full speed the relay serves the 96-byte full-speed HID report descriptor. It re-packetises iAP traffic between the two tables in both directions (section 8.2). It also drops zero-length interrupt reads. It works only when the device's HID report descriptor is 208 bytes at high speed and 96 at full speed. |
 | `08-fs-in-max-report` (R15 test) | Adds option `apple_fs_in_max_count` in `config.json` (default 63). A test with 20 did not change anything, and the option was removed from `config.json`. The patch is still applied, with no effect. |
+| `09-ack-config-zero` (R17) | A Linux host sends `SET_CONFIGURATION 0`. Upstream skipped it without an ACK, and the host timed out after 5 s. The patch acks configuration 0 and stalls other invalid values. The car stereo never sends it. |
 
 ### 5.3 Rules and options
 

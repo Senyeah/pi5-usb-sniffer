@@ -1,0 +1,22 @@
+diff --git a/proxy.cpp b/proxy.cpp
+index 3f0d581..18bf8a7 100644
+--- a/proxy.cpp
++++ b/proxy.cpp
+@@ -1529,7 +1529,16 @@ void ep0_loop(int fd) {
+ 					}
+ 				}
+ 				if (desired_config < 0) {
+-					printf("[Warning] Skip changing configuration, wValue(%d) is invalid\n", event.ctrl.wValue);
++					if (event.ctrl.wValue == 0) {
++						// SET_CONFIGURATION 0 (deconfigure): Linux hosts send it. Ack, or the host waits 5 s for the status stage.
++						printf("SET_CONFIGURATION 0: acked, no change\n");
++						rv = usb_raw_ep0_read(fd, (struct usb_raw_ep_io *)&io);
++						if (rv < 0)
++							printf("ep0: ack failed: %d\n", rv);
++					} else {
++						printf("[Warning] Stall: configuration wValue(%d) is invalid\n", event.ctrl.wValue);
++						usb_raw_ep0_stall(fd);
++					}
+ 					continue;
+ 				}
+ 

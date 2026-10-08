@@ -1,0 +1,23 @@
+#!/bin/sh
+# Press a car stereo button on the Pi 3 sink. Usage: stereo playpause | next
+case "${1:-}" in
+  playpause | play-pause | pp) cmd=toggle ;;
+  next | n) cmd=stereo-next ;;
+  *) echo "Usage: stereo playpause | next" >&2; exit 2 ;;
+esac
+
+status=$(iap-sink ctl status 2>&1)
+case $status in
+  "{"*) ;;
+  *) echo "$status" >&2; exit 1 ;;
+esac
+
+iap-sink ctl "$cmd" > /dev/null || exit 1
+sleep 1.5
+iap-sink ctl status | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+ms = lambda v: "%d:%02d" % (v // 60000, v // 1000 % 60)
+who = " - ".join(x for x in (d["title"], d["artist"]) if x)
+print("%s | track %s/%s | %s | %s/%s" % (d["play_state"], d["track"], d["num_tracks"], who or "(no title)", ms(d["position_ms"]), ms(d["length_ms"])))
+'

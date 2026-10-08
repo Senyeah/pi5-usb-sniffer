@@ -6,3 +6,6 @@ sessions/
 __pycache__/
 .pytest_cache/
 .ruff_cache/
+
+# Pi 3 sink build output
+sink/out/
