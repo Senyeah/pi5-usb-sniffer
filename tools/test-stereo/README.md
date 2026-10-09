@@ -1,12 +1,15 @@
-# Pi 3 sink: a car stereo for testing the Pi 5 relay
+# Test stereo (`tools/test-stereo`): a Pi 3 B that plays the car stereo
 
-A Raspberry Pi 3 B plays the part of the car stereo. The Pi 5 relay plugs into the Pi 3 in place of the car. The Pi 3 selects the Apple USB configuration, speaks iAP1 like the Panasonic stereo in session `car-10`, and plays the USB audio on its 3.5 mm jack.
+A Raspberry Pi 3 B plays the part of the car stereo on the bench. It selects the Apple USB configuration, speaks iAP1 like the Panasonic stereo (session `car-10`, and the car runs of 09/10/2026), and plays the USB audio on its 3.5 mm jack. It was built to test the Pi 5 relay. Now it is the bench stereo for the Bluetooth bridge in the repository root, and the far end of the delay measurement (`latency-test.sh`).
 
 ```
-Apple device ── Pi 5 relay ── USB-C cable (VBUS taped) ──► Pi 3 USB-A port   (the Pi 3 is the USB host)
- (USB device)   usb-proxy                                    iap-sink: iAP1 over HID
-                                                             sink-audio: USB audio ──► 3.5 mm jack
+phone ── Bluetooth ── Pi 5 bridge ─┐
+                                   ├─ USB-C cable (VBUS taped) ──► Pi 3 USB-A port   (the Pi 3 is the USB host)
+Apple device ── Pi 5 relay ────────┘                              iap-sink: iAP1 over HID
+ (USB device)   usb-proxy                                         sink-audio: USB audio ──► 3.5 mm jack
 ```
+
+This folder was `sink/` before 09/10/2026. The names on the Pi 3 did not change: host `pi3-sink`, program `iap-sink`, services `iap-sink` and `sink-audio`.
 
 ## Press the stereo buttons
 
@@ -48,11 +51,11 @@ The iPod sends a 20-byte challenge and expects a 128-byte signature. The private
 ## 3. Set-up
 
 1. Flash Raspberry Pi OS Lite 64-bit (Trixie, with cloud-init) to the SD card. Do not use the Imager's own customisation.
-2. Personalise the card on the Mac. This writes Wi-Fi, users, host name `pi3-sink` and kernel options. The values come from environment variables, like `pi/prepare-sdcard.sh`:
+2. Personalise the card on the Mac. This writes Wi-Fi, users, host name `pi3-sink` and kernel options. The values come from environment variables, like `tools/relay/prepare-sdcard.sh`:
 
 ```bash
 WIFI_SSID=... WIFI_PSK_REF=op://<vault>/<item>/<field> SSH_KEY_REF=op://<vault>/<item>/<field> \
-  sink/prepare-sdcard.sh /Volumes/bootfs
+  tools/test-stereo/prepare-sdcard.sh /Volumes/bootfs
 ```
 
    The script also writes a new cloud-init instance ID to `meta-data`. cloud-init runs the users, keys and `runcmd` steps once per instance ID, so a card that booted before (for example from the Imager) would skip them otherwise.
@@ -60,7 +63,7 @@ WIFI_SSID=... WIFI_PSK_REF=op://<vault>/<item>/<field> SSH_KEY_REF=op://<vault>/
 4. Install the sink over SSH. The certificate path is optional but needed for the iPod to accept the stereo:
 
 ```bash
-ACCESSORY_CERT_FILE=sessions/20261008-221642-car-10/decoded/accessory-cert-1.p7b sink/deploy.sh
+ACCESSORY_CERT_FILE=sessions/20261008-221642-car-10/decoded/accessory-cert-1.p7b tools/test-stereo/deploy.sh
 ```
 
 `deploy.sh` runs `build.sh` first (format check, `go vet`, tests with the race detector, then the arm64 build in Docker). Run it again after any change.
@@ -77,14 +80,14 @@ Kernel options that `prepare-sdcard.sh` adds to `cmdline.txt`:
 
 ## 4. How the connection works
 
-A Linux host would send `SET_CONFIGURATION 0` or `1` as soon as the device appears. The stereo sent only configuration 2, and the relay cannot take anything else (risk R17 in `PLAN.md`). So `iap-sink`:
+A Linux host would send `SET_CONFIGURATION 0` or `1` as soon as the device appears. The stereo sent only configuration 2, and the relay cannot take anything else (risk R17 in `../../PLAN.md`). So `iap-sink`:
 
 1. Claims every USB-A port of the onboard hub (`USBDEVFS_CLAIM_PORT`). The kernel then enumerates the device but does not configure it. `IAP_CLAIM_PORTS=0` switches this off.
 2. Releases the port of the Apple device. A claimed port also stops `usbhid` and `snd-usb-audio` from binding.
 3. Sends configuration 2 through sysfs. The kernel binds `usbhid` (`/dev/hidrawN`) and `snd-usb-audio` (an ALSA card named after the device).
 4. Claims the port again when the session ends, before the next device appears.
 
-The relay needs patch 09 (`pi/patches/`): the kernel still sends `SET_CONFIGURATION 0` once when it enumerates a claimed device.
+The relay needs patch 09 (`tools/relay/patches/`): the kernel still sends `SET_CONFIGURATION 0` once when it enumerates a claimed device.
 
 ## 5. A test session
 
@@ -104,7 +107,7 @@ iap-sink ctl raw 0004001c          # any packet: hex of lingo, command and argum
 5. **Restart the relay before each new sink session.** If you restart only the Pi 3 sink, the Apple device is still in the old session and ignores the new `IdentifyDeviceLingoes` (the relay's `PROXY_RESET=1` exists for this). Run `capture stop` and `capture start` on the Pi 5, or replug.
 6. Compare with the car: `/var/lib/iap-sink/traces/session-*.jsonl` holds every iAP packet (`A>D` is sent by the Pi 3, `D>A` comes from the Apple device) and, with `IAP_TRACE_HID=1` (default), every raw HID report, with hex.
 
-Never use a USB-C to USB-C cable between the two Pis. Keep VBUS taped, as in the main README.
+Never use a USB-C to USB-C cable between the two Pis. Keep VBUS taped, as in the root README.
 
 ## 6. Results of the first bench run (09/10/2026, iPhone 15 Pro, iOS 27.0.1)
 
@@ -115,7 +118,7 @@ Never use a USB-C to USB-C cable between the two Pis. Keep VBUS taped, as in the
 | iAP1: identify, certificate, sample rates, init script, polling, track metadata, play | Pass. The iPhone accepted the certificate (`AckDevAuthenticationInfo` status 0) |
 | USB audio to the 3.5 mm jack | Pass: the ALSA card `iPhone` appears, `alsaloop` plays, audio is clean by ear |
 | Control test (session `sink-05`): pause, play, next, prev, toggle ×2, next, prev | **Pass.** All 15 `PlayControl` packets were acked `success` by the iPhone 2 to 3 ms after the sink sent them. Pause and play changed the state at once. Next gave a new song. Previous restarted the song after 3 s, as an iPod does. All 16,877 transfers in the capture are explained. Audio: 64,772 packets, 0 error packets, 1 isochronous timing event at the start. The relay forwarded `SET_CONFIGURATION 2` only (twice per connection, as in `car-10`), and acked configuration 0 without forwarding it. |
-| Pi 5 as a Bluetooth iPod (no iPhone on USB) | Pass. The sink is the stereo for `pi/ipod/`: same session, track data from a Bluetooth phone, audio on the jack, `stereo playpause` and `stereo next`. See `pi/ipod/README.md`. |
+| Pi 5 as a Bluetooth iPod (no iPhone on USB) | Pass. The sink is the stereo for the bridge (repository root): same session, track data from a Bluetooth phone, audio on the jack, `stereo playpause` and `stereo next`. See the root README. |
 | iAP1 after 2.5 minutes | **The iPhone stops answering.** It sent two signature challenges 75 s apart, got no signature, then sent `AckDevAuthenticationStatus` with status `0x07` (failed) and **no packet after that**. Audio keeps playing. The car stereo answered the first challenge after 56 s. So one connection gives about 2.5 minutes of iAP control without the key. |
 
 Bugs found and fixed on the way: the sink crashed in upstream `parsePacket` on a frame with a lost first fragment (now a bounds-checked splitter and a frame reader that drops orphan fragments and logs them), and the relay did not ack configuration 0 (patch 09).
@@ -149,7 +152,7 @@ Bugs found and fixed on the way: the sink crashed in upstream `parsePacket` on a
 Tests with a private capture (the files stay on the Mac):
 
 ```bash
-IAP_CAPTURE_TIMELINE=sessions/<dir>/decoded/timeline.jsonl IAP_REAL_CERT=sessions/<dir>/decoded/accessory-cert-1.p7b sink/build.sh
+IAP_CAPTURE_TIMELINE=sessions/<dir>/decoded/timeline.jsonl IAP_REAL_CERT=sessions/<dir>/decoded/accessory-cert-1.p7b tools/test-stereo/build.sh
 ```
 
 The certificate and the capture are private. Keep them out of git, like `sessions/`.

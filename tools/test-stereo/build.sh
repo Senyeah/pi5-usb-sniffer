@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Test and build iap-sink for the Pi 3 (Linux arm64) in Docker. Output: sink/out/iap-sink
+# Test and build iap-sink for the Pi 3 (Linux arm64) in Docker. Output: tools/test-stereo/out/iap-sink
 # Optional: IAP_CAPTURE_TIMELINE and IAP_REAL_CERT (paths on the Mac) switch on the tests against a private capture.
 set -euo pipefail
 

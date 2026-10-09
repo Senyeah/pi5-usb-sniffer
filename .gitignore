@@ -1,4 +1,4 @@
-# Captures and decoder output hold private data (README.md section 10).
+# Captures, decoder output and latency captures hold private data (README.md, "Data and privacy").
 sessions/
 
 .DS_Store
@@ -7,6 +7,6 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 
-# Pi 3 sink build output
-sink/out/
-pi/ipod/out/
+# Build output
+out/
+tools/test-stereo/out/

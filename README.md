@@ -1,41 +1,52 @@
-# Pi 5 iAP USB relay and sniffer
+# pi-iap-bt-bridge: a Pi that turns Bluetooth audio into iAP1
 
-Handover notes for an agent that starts with no context. Last updated 08/10/2026.
+Handover notes for an agent that starts with no context. Last updated 09/10/2026.
 
-Read this file first. Then read [PLAN.md](PLAN.md). It holds the full history: each phase with its result, and risks R1–R16 with evidence. The code is in `pi/` (the relay, on the Pi) and `decode/` (the decoder, on the Mac).
+Read this file first. Then read [PLAN.md](PLAN.md): the goal, the status, the open work, the user's decisions, the full history (phases 0–12) and risks R1–R23 with evidence.
 
 ## 1. What this project is
 
-A Raspberry Pi 5 sits between an Apple device and an old car stereo. The stereo thinks that the Pi is the Apple device. The Pi forwards all USB traffic in both directions and records it. A Python tool on the Mac decodes the recordings offline.
+A Raspberry Pi 5 lets an old car stereo that knows only iPods play a phone over Bluetooth. The phone sends its audio and track data to the Pi over Bluetooth (A2DP and AVRCP). To the stereo, the Pi is an iPod on USB: it synthesizes the whole iAP1 session (identification, the authentication exchange, play status, track data, notifications) and the USB audio from the Bluetooth input. The stereo's buttons control the phone.
 
-The stereo speaks **iAP1** (Apple's legacy iPod Accessory Protocol) over **USB HID**. Music goes over **USB Audio Class 1** (isochronous). No CarPlay, no iAP2.
+```
+phone ──Bluetooth A2DP──► Pi 5 ──BlueALSA──► alsaloop ──► USB gadget sound card ──► USB-C cable ──► car stereo
+  ▲     AVRCP metadata       │                                                        (VBUS taped)      (USB host)
+  └─────AVRCP controls───────┴── ipod-bridge ◄── iAP1 over HID (/dev/hidg0) ◄────────────────────────────┘
+```
 
-| Part | State on 08/10/2026 |
+The stereo speaks **iAP1** (Apple's legacy iPod Accessory Protocol) over **USB HID** and takes music over **USB Audio Class 1**. No CarPlay, no iAP2. The stereo is a Panasonic CQ-JZ41F0AE (Suzuki PA68L0) in a Suzuki Swift of about 2010.
+
+| Part | State on 09/10/2026 |
 |---|---|
-| Relay in the car | **Works.** The stereo identifies the device, authenticates, plays audio and its buttons control playback. Proven in sessions `car-10` and `car-15`. |
-| Audio through the relay | **Clean** with 4 CPU cores: 5 of 69,900 packets dropped in `car-15`. |
-| Track titles on the stereo | Not shown. **This is the stereo's own behaviour**: it shows no title with a direct connection either. Not a relay fault. |
-| Capture | Works. One folder per session: pcapng, relay log, UDC state log, marks. |
-| Decoder | Works. Explains all 27,174 transfers in `car-10`. 29 unit tests pass. |
-| Golden captures | **Not done.** The Phase 5 action list with marks still needs a car session. |
-| Mac as host (Finder, usbmux pairing) | Image Capture works. Finder pairing does not complete. Not needed for the stereo, so not fixed. |
+| Stereo session (USB and iAP1) | **Works in the car.** Full-speed link, certificate, init queries, polling. |
+| Audio from the phone | **Plays in the car.** Less clipping after the fixed -6 dB gain, but some remains (third car run). |
+| No phone connected | A playing "Waiting" track instead of `Unsupported` (third car run: works). |
+| Stereo buttons | Play, pause (also the stereo's mute), next, back, DISP, RDM and RPT work (third car run: "seems to work OK"). |
+| Pairing and reconnecting | The Pi connects to a paired phone by itself, forgets dead pairings, and opens a pairing window when no phone connects. |
+| Delay reporting | The iPad accepts the Pi's delay report (500 ms for now). The Pi's real delay is not measured yet, and `alsaloop` has not run with a USB host yet. |
+
+### How we got here
+
+The project did not start as a bridge. Each step gave the next one its facts. [PLAN.md](PLAN.md), section 6, has every phase with its result.
+
+1. **Relay and sniffer** (Pi 5, `tools/relay/`, 08/10/2026). The Pi sat between an iPad and the stereo, relayed all USB traffic and recorded it. Nine `usb-proxy` patches made the stereo accept the relayed device (full-speed descriptors, the full-speed HID table, fast acks). Session `car-10` is the recording of a working stereo session.
+2. **Decoder** (`tools/decode/`). It explained all 27,174 transfers of `car-10`: what the stereo sends, in which order, and what the iPad answers.
+3. **Test stereo** (Pi 3 B, `tools/test-stereo/`). It replays the stereo's side of `car-10` byte for byte, so the Pi 5 can be tested on the bench.
+4. **Bluetooth bridge** (this folder). The Pi 5 answers like the iPad of `car-10`, with data from a Bluetooth phone. It passed on the bench, then three car runs found what the bench could not show: the stereo's play commands for a stopped iPod, its index-based skips, and clipping. Then came delay reporting.
 
 ## 2. Hardware and wiring
 
 ```
-Apple device (USB device)
-   │  USB-A plug to USB-C plug cable
-   ▼
-Pi 5 BLACK USB 2.0 port (host side, xHCI, usbmon bus 1)
-   │  usb-proxy: libusb on the host side, raw_gadget on the device side
-   ▼
-Pi 5 USB-C port (device side, dwc2 peripheral, UDC 1000480000.usb)
-   │  USB-C plug to USB-A plug cable, VBUS (pin 1) TAPED
-   ▼
-Car stereo USB-A socket (USB host, full speed only)
+phone ── Bluetooth ──► Pi 5 (onboard Bluetooth, BCM4345C0)
+                         │  USB-C port (device side, dwc2 peripheral, UDC 1000480000.usb)
+                         │  USB-C plug to USB-A plug cable, VBUS (pin 1) TAPED
+                         ▼
+                       Car stereo USB-A socket (USB host, full speed only)
 
 Bench supply 5.1 V ──► GPIO pins 2 and 4 (5 V), pins 6 and 14 (GND)
 ```
+
+On the bench the Pi 3 B test stereo takes the place of the car stereo, with the same taped cable. The relay wiring (an Apple device on a black USB-A port of the Pi 5) is in [tools/relay/README.md](tools/relay/README.md).
 
 | Item | Facts |
 |---|---|
@@ -43,21 +54,20 @@ Bench supply 5.1 V ──► GPIO pins 2 and 4 (5 V), pins 6 and 14 (GND)
 | iPhone | iPhone 15 Pro, `05ac:12a8`, iOS 27. Used for the desk and Mac tests. |
 | iPad | `05ac:12ab`, reports software version 26.6.1 over iAP. **Both working car sessions used the iPad.** The iPhone has not been re-tested in the car through the final relay. |
 | Pi | Raspberry Pi 5, Raspberry Pi OS Lite 64-bit (Debian 13 Trixie), kernel `6.18.50+rpt-rpi-2712`. |
+| Pi 3 B | Test stereo: host `pi3-sink`, full-speed USB host like the car (`dwc_otg.speed=1`), audio on the 3.5 mm jack. |
 
 Rules that protect the hardware:
 
 - **Keep VBUS taped** on pin 1 of the USB-A plug that goes to the stereo. Use the same taped cable for Mac tests, with a USB-C to USB-A adapter on the Mac. Never use a USB-C to USB-C cable to a host. Phase 1 measured 0 V on the Pi's USB-C VBUS, so the Pi does not drive it. Current from a host into the Pi's 5 V rail is still unknown.
-- **Use a black USB 2.0 port** for the Apple device. A blue USB 3 port can connect an iPhone 15 Pro at SuperSpeed with different descriptors.
 - **Power:** bench supply at 5.1 V, current limit 5 A, into the GPIO header. Never connect a USB-C power supply at the same time. Use short, thick leads. Thin leads dropped 0.19 V: the SD card then read garbage, and the Pi shut down at about 1 A. Check the voltage under load with `vcgencmd pmic_read_adc EXT5V_V`. It must stay at 5.0 V or more.
-- `usb_max_current_enable=1` in `config.txt` raises the USB-A limit to 1.6 A in total. GPIO power gives no USB-PD data, so without it the limit is 600 mA.
 - **Shut down before you cut power:** `ssh root@pi5-sniffer.local poweroff`. Hard power cuts during boot once left the Wi-Fi profile as a 0-byte file. The last session on 08/10/2026 ended with a hard cut.
 - **In the garage:** key in ACC only. Never run the engine in a closed garage. A flat battery makes the stereo ask for its security code.
 
-## 3. Access to the Pi
+## 3. Access to the Pis
 
 | Item | Value |
 |---|---|
-| Host name | `pi5-sniffer`, or `pi5-sniffer.local` over mDNS |
+| Host names | `pi5-sniffer` (the bridge, named in the relay days) and `pi3-sink` (the test stereo), or `<name>.local` over mDNS |
 | Login | `root` with an SSH key. User `jack` exists too: key only, passwordless sudo. |
 | SSH public key | The user's own key. `prepare-sdcard.sh` reads it with `op read` from the secret reference in `SSH_KEY_REF`. |
 | Wi-Fi | One WPA2 network, set with `WIFI_SSID` and `WIFI_PSK_REF` when the card is prepared. The Pi has a NetworkManager keyfile for it. |
@@ -71,268 +81,188 @@ Rules:
 
 ## 4. Repository map
 
-This folder is not a git repository. macOS adds `.DS_Store` files; exclude them when you copy files to the Pi.
+macOS adds `.DS_Store` files; exclude them when you copy files to a Pi.
 
 ```
-pi5-usb-sniffer/
-├── README.md                 # this file
-├── PLAN.md                   # full plan, phase results, risks R1–R16, evidence
-├── pi/                       # everything that runs on the Pi
-│   ├── prepare-sdcard.sh     # Mac: customises a freshly flashed boot partition (cloud-init)
-│   ├── sniffer-setup.service # first-boot unit that runs setup.sh once
-│   ├── setup.sh              # packages, raw_gadget (DKMS), usb-proxy build with patches, system config
-│   ├── capture.sh            # installed as /usr/local/bin/capture
-│   ├── patches/              # usb-proxy-01 … -09, applied in name order
-│   └── rules/
-│       ├── apple-vendor-rules.json  # usb-proxy injection rules: ignore and stall
-│       └── config.json              # usb-proxy options file
-├── sink/                     # Pi 3 B test sink: plays the car stereo for the relay, see sink/README.md
-│   (pi/ipod/               # Bluetooth iPod: the Pi 5 as an iPod for the stereo, see pi/ipod/README.md)
-├── decode/                   # Python decoder, a uv project
-│   ├── pyproject.toml
-│   ├── uv.lock
-│   ├── src/iap_decode/
-│   └── tests/
-└── sessions/                 # captures copied from the Pi, and decoder output. PRIVATE.
+pi-iap-bt-bridge/
+├── README.md               # this file
+├── PLAN.md                 # goal, status, open work, decisions, history (phases 0–12), risks R1–R23
+├── bridge/                 # ipod-bridge (Go): the iPod side of iAP1, the BlueZ phone, pairing, delay reports
+├── files/                  # files installed on the Pi 5: ipod-gadget, ipod-mode, ipod-audio, units, settings, ALSA gain
+├── uac1-fs/                # DKMS patch: the kernel UAC1 gadget at full speed (R18)
+├── latency/                # analyze.py and selftest.py: the Pi's delay, Bluetooth in to USB out
+├── build.sh                # tests and builds ipod-bridge in Docker; output out/ipod-bridge
+├── deploy.sh               # builds and installs everything on the Pi 5
+├── install-on-pi.sh        # run on the Pi 5 by deploy.sh
+├── install-uac1-fs.sh      # run on the Pi 5 by deploy.sh: fetches, patches and builds the UAC1 modules
+├── audio-test.sh           # USB audio path without Bluetooth (needs the Pi 3)
+├── latency-test.sh         # captures for the delay measurement (needs the Pi 3)
+├── tools/
+│   ├── relay/              # the USB relay and sniffer: Pi 5 card set-up, usb-proxy patches, rules, capture
+│   ├── decode/             # Python decoder for the relay's captures (uv project)
+│   └── test-stereo/        # Pi 3 B that plays the car stereo (iap-sink, stereo buttons, audio to the jack)
+├── out/                    # build output and latency captures, not in git
+└── sessions/               # captures copied from the Pis, and decoder output. PRIVATE, not in git
 ```
 
-## 5. Pi software
+Before 09/10/2026 the bridge was in `pi/ipod/`, the relay in `pi/`, the decoder in `decode/` and the test stereo in `sink/`. The repository was `pi5-usb-sniffer`. Older notes and commits use those paths.
 
-### 5.1 How the Pi was built
+## 5. Set-up
 
-1. Flash Raspberry Pi OS Lite 64-bit (Trixie, with cloud-init) to an SD card.
-2. On the Mac, run `pi/prepare-sdcard.sh /Volumes/bootfs` with `WIFI_SSID`, `WIFI_PSK_REF` and `SSH_KEY_REF` set. It reads the SSH key and the Wi-Fi password with `op read` (1Password CLI). It writes cloud-init `user-data` and `network-config`, adds lines to `config.txt` and `cmdline.txt`, and copies `pi/` to `bootfs/sniffer/`.
-3. On first boot, cloud-init copies the files to `/opt/sniffer/pi/` and starts `sniffer-setup.service`.
-4. `setup.sh` waits for the network and the clock, runs `apt full-upgrade`, and installs the packages. It builds `raw_gadget` through DKMS and builds `usb-proxy` with the patches. It configures the system, installs `capture`, and reboots.
-   - Log: `/var/log/sniffer-setup.log`.
-   - Done marker: `/var/lib/sniffer/setup-done`.
-   - Versions: `/var/lib/sniffer/versions.txt`.
+The Pi 5 was built as the relay first: see [tools/relay/README.md](tools/relay/README.md), section 3.1 (card set-up with `tools/relay/prepare-sdcard.sh`, then `setup.sh` on first boot). The relay software stays installed. The bridge goes on top.
 
-| Setting | Where | Why |
+On the Mac, with the Pi 5 online. This installs `bluez-alsa-utils`, builds the patched kernel module (DKMS, about 1 minute), builds `ipod-bridge` in Docker, and copies everything:
+
+```bash
+./deploy.sh
+```
+
+On the Pi 5. This stops the relay, starts the gadget, the bridge and the audio player, and enables them at every boot:
+
+```bash
+ssh root@pi5-sniffer.local ipod-mode bt
+```
+
+Pair the phone once. The bridge opens a 10 minute pairing window by itself in two cases: no phone is paired when it starts, or no phone is connected 60 s after it started (`IPOD_PAIR_AFTER`). A paired phone in range connects before that, so the window stays closed. Open it by hand with `ipod-bridge ctl pair`. On the phone: Settings, Bluetooth, tap **Pi iPod**. The phone is trusted after pairing. After that the **Pi connects to the phone by itself**, about 30 s after power-on: `ipod-bridge` asks for the classic A2DP connection to every paired and trusted phone that is not connected, every 10 s (every 30 s after a minute without success, for example when the phone is out of range). Nobody has to tap the phone. If the stereo's state is "playing" when the phone connects, the bridge starts the phone's player (section 6.2); else press play on the stereo or the phone.
+
+When the phone deletes the pairing ("Forget This Device"), the Pi still has its key and every connect fails with `br-connection-key-missing`. A Pi with a pairing never opens the window and stays hidden, so the phone cannot pair again. The bridge now removes such a pairing after 3 failed connects in a row and opens the window. `ipod-bridge ctl forget all|<address>|<name>` does the same by hand.
+
+Go back to the relay: `ipod-mode relay`, then `capture start <label>`. The two modes use the same USB-C port, so only one runs.
+
+Do not use a USB-C to USB-C cable to the stereo. Keep VBUS taped (section 2).
+
+The Pi 3 test stereo: [tools/test-stereo/README.md](tools/test-stereo/README.md).
+
+## 6. How it works
+
+### 6.1 Parts
+
+| Part | What it does | Files |
 |---|---|---|
-| `dtoverlay=dwc2,dr_mode=peripheral` | `config.txt`, `[all]` | USB-C port becomes a USB device. UDC name `1000480000.usb`. |
-| `usb_max_current_enable=1` | `config.txt` | 1.6 A on USB-A with GPIO power. |
-| `cfg80211.ieee80211_regdom=NZ` | `cmdline.txt` | Wi-Fi country. The image ships with Wi-Fi blocked until a country is set. |
-| `usbhid.quirks=0x05ac:0x12a8:0x4,0x05ac:0x12ab:0x4` | `cmdline.txt` | `HID_QUIRK_IGNORE`. `usbhid` is built into the kernel and would bind the Apple HID interface. That delayed `SET_CONFIGURATION` (R13). |
-| `usbmon`, `raw_gadget` | `/etc/modules-load.d/sniffer.conf` | Loaded at boot. |
-| blacklist `ipheth`, `snd_usb_audio`, `cdc_ncm`, `cdc_ether` | `/etc/modprobe.d/sniffer-blacklist.conf` | Only `usb-proxy` may use the Apple device. |
-| `usbmuxd` masked | systemd | Same reason. |
-| `raw_gadget` | DKMS, `xairy/raw-gadget` at `8c6de54` | Not in the Pi kernel. Version string `1.0+8c6de54`. |
-| `usb-proxy` | `/opt/sniffer/usb-proxy`, `AristoChen/usb-proxy` at `a08301d` | The relay, with the patches in section 5.2. |
-
-**Last known Pi state that a fresh card would not have.** The Pi was offline at the end of the session, so check these:
-
-- `config.txt` has the GPU driver line commented out (`#dtoverlay=vc4-kms-v3d`, with a "LOW-POWER TEST" comment). This was left from a power test. The clock is back to normal, and all 4 cores are on (`maxcpus=1` was removed). **Keep 4 cores:** one core caused audio drops.
-- Backups exist next to the boot files: `*.before-lowpower` and `cmdline.txt.before-4cores`.
-- Some debug tools exist only on the Pi, in `/opt/sniffer/tools/`. They are not in this repo:
-  - `otherspeed.c` fetches other-speed descriptors.
-  - `hiddesc.c` dumps the HID class and report descriptors.
-  - `probe.c` sends 1-byte `SET_REPORT` tests.
-  - `setcfgtime.c` times `set_configuration` and interface claims.
-- 28 sessions (about 251 MB) are in `/root/sessions/`.
-
-### 5.2 The usb-proxy patches
-
-Upstream `usb-proxy` could not relay this device to this stereo. Each patch fixes one observed failure. They apply in name order on commit `a08301d` and build with no warnings.
-
-| Patch | Problem it fixes |
-|---|---|
-| `01-detach-before-claim` | The kernel binds `usbhid` and `snd-usb-audio` after `SET_CONFIGURATION`. The patch detaches kernel drivers before each interface claim. |
-| `02-rules-wildcard-block` | Adds `-1` wildcards to the injection rules. Ignore and stall rules are checked **before** a request goes to the device; upstream forwarded IN requests first. An ignored OUT request is acked to the host and not forwarded. Prints each matched rule. |
-| `03-suspend-retry` | When the host suspends the bus, an endpoint write returns `EAGAIN` and upstream calls `exit()`. The patch waits and retries. Both the Mac and the stereo suspend the bus. |
-| `04-full-speed-host` (R11) | The stereo is full speed only, but the device is high speed. At start the relay fetches the other-speed descriptors (`GET_DESCRIPTOR` type 7). If `/sys/class/udc/*/current_speed` is `full-speed`, it serves those in place of the configuration descriptors. It also enables the gadget endpoints with the full-speed packet size and interval. |
-| `05-learned-stalls` (R12) | The gadget framework acks an OUT control request with data before the relay can read it, so a device STALL cannot reach the host. The patch remembers each setup packet that the device stalled. It stalls the host at SETUP the next time that request comes. |
-| `06-ack-before-device-work` (R13) | A standard request with no data must complete within 50 ms. `SET_CONFIGURATION` on the real device takes about 54 ms. The patch enables the gadget endpoints and acks first, then configures the device and starts the endpoint threads. `SET_INTERFACE` uses the same order. |
-| `07-apple-hid-fs-tables` (R14) | The Apple device has a different HID report table at each speed. At full speed the relay serves the 96-byte full-speed HID report descriptor. It re-packetises iAP traffic between the two tables in both directions (section 8.2). It also drops zero-length interrupt reads. It works only when the device's HID report descriptor is 208 bytes at high speed and 96 at full speed. |
-| `08-fs-in-max-report` (R15 test) | Adds option `apple_fs_in_max_count` in `config.json` (default 63). A test with 20 did not change anything, and the option was removed from `config.json`. The patch is still applied, with no effect. |
-| `09-ack-config-zero` (R17) | A Linux host sends `SET_CONFIGURATION 0`. Upstream skipped it without an ACK, and the host timed out after 5 s. The patch acks configuration 0 and stalls other invalid values. The car stereo never sends it. |
-
-### 5.3 Rules and options
-
-`pi/rules/apple-vendor-rules.json`, loaded by default:
-
-| Rule | Request | Why |
+| Part | What it does | Files |
 |---|---|---|
-| ignore | `bmRequestType 0x40, bRequest 0x40`, any value and index, no data | The Apple charge request. macOS asks for 2400 mA, and the iPhone then trips the Pi's 1.6 A USB-A limit (R4). The relay acks it and does not forward it. |
-| stall | any type, `bRequest 0x52`, `wLength 1` | Apple "set USB mode". The iPhone re-enumerates with 6 configurations, and the relay loops. |
-| stall | `0x21/0x09` (HID `SET_REPORT`), `wIndex 2`, `wLength 1` | 1-byte `SET_REPORT` probes (report ID only). The stereo sent these in a loop when it got a truncated HID descriptor (R14). |
+| USB gadget | An iPad (`05ac:12ab`) with two configurations. The stereo selects configuration 2: USB audio out of the device, and the iAP HID interface (the 96-byte full-speed report descriptor). Built with configfs. | `files/usr/local/sbin/ipod-gadget` |
+| Patched audio function | The kernel's UAC1 function has a full-speed bug. See section 6.4. | `uac1-fs/`, `install-uac1-fs.sh` |
+| `ipod-bridge` | Go program. The iPod side of iAP1 on `/dev/hidg0`. Gets track data from the phone and sends the stereo's controls to it. Also the pairing agent. | `bridge/` |
+| BlueZ + BlueALSA | A2DP sink and AVRCP. `ipod-audio` runs `alsaloop` from the BlueALSA PCM into the gadget sound card, at a fixed delay and gain. | `files/etc/systemd/system/`, `files/usr/local/sbin/ipod-audio` |
+| `ipod-mode` | Switches the Pi 5 between this mode and the USB relay. | `files/usr/local/sbin/ipod-mode` |
 
-**Quirk: numbers in this file are hex digits written as JSON integers.** `40` means 0x40, and `52` means 0x52. `usb-proxy` converts them when it matches. The rule list that `usb-proxy` prints at start shows the unconverted value, for example `bRequestType=0x28` for `40`. That is the display only; matching uses 0x40.
+`ipod-bridge` reuses `oandrew/ipod` (v0.2.0) for packet checksums and the HID report types. Its replies are checked byte for byte against the real iPad in session `car-10`.
 
-`pi/rules/config.json` holds `{"reset_device_before_proxy": false}`. `capture` does not use this file directly. It writes `/run/sniffer/config.json` with the reset flag from `PROXY_RESET`, and it always passes `--enable_customized_config`. `usb-proxy` reads `config.json` only from its working directory (`/run/sniffer`), and only with that flag.
+### 6.2 What the stereo gets
 
-### 5.4 The `capture` command
-
-`/usr/local/bin/capture` is `pi/capture.sh`. Run it as root.
-
-| Command | What it does |
+| Stereo asks | The bridge answers from |
 |---|---|
-| `capture start [label]` | Loads `usbmon` and `raw_gadget`. Waits for an Apple device on USB-A, and warns if it is not at 480 Mbit/s. Creates `/root/sessions/YYYYmmdd-HHMMSS-label/` and the symlink `/root/sessions/current`. Writes the metadata, then starts three transient systemd units. Prints "Connect the Pi's USB-C cable to the stereo now." |
-| `capture mark <text>` | Adds a line to `marks.tsv`: UTC time, NZ local time, text. |
-| `capture stop` | Adds a "session stop" mark and stops the units. dumpcap gets SIGTERM, so it closes the file correctly. Prints an `rsync` command. |
-| `capture status` | Unit states, UDC state and speed, the Apple device, the current session. |
+| `IdentifyDeviceLingoes` | Acks, then asks for the stereo's certificate, sample rates and info, and sends a signature challenge, like the iPad. |
+| Authentication | The Pi has no Apple key and does not check the signature. It sends "passed" when the signature arrives, or after `IPOD_AUTH_TIMEOUT` (70 s). |
+| `GetPlayStatus`, track time notifications | AVRCP status and position (extrapolated between updates), track length. Notifications every 0.5 s while playing. With no phone: the "Waiting" track (below). |
+| Title, artist, album, genre of a track | AVRCP track data of the phone. With no phone: `Waiting`. |
+| `GetCurrentPlayingTrackIndex`, `GetNumPlayingTracks` | A virtual playlist of 1000 tracks. The index starts at 500 and counts track changes. The stereo shows this number. |
+| `PlayCurrentSelection`, `PlayControl` toggle, play, pause, stop | `Play`, `Pause`, `Stop` on the phone's player. `PlayCurrentSelection` is what the stereo sends first when the iPod is stopped. |
+| `PlayControl` next and previous, `SetCurrentPlayingTrack` | `Next` or `Previous`. `SetCurrentPlayingTrack` gives the steps from the current index, the short way round the list, up to 5 (quick presses add up). After `PlayControl` previous, a `SetCurrentPlayingTrack` with the old index (the back button's second command) does nothing. |
+| Shuffle, repeat | The phone's player properties. |
+| `RequestiPodName` | The phone's Bluetooth name, or `IPOD_NAME`. With no phone: `iPod`. |
 
-| Systemd unit | Runs |
+The phone sends the data of a new track in steps (the album first, the title after). The bridge waits 0.8 s until the data is complete before it counts a track change.
+
+**"Waiting" when no phone has track data.** An empty, stopped iPod makes the stereo show `Unsupported`. So with no phone (or a phone without track data) the stereo gets a track called `Waiting` (title, artist, album, genre, composer), 1 hour long, with a running position. The USB audio carries silence: the kernel clears the buffer when playback stops. The stereo's play and pause switch this track, and the bridge keeps that state. When a phone connects while the stereo's state is "playing", the bridge sends `Play`. Then the phone's track replaces `Waiting` with a new index. While a phone is connected, the state follows the phone. Every play command gets success, so no `ERROR 2` (PLAN.md, Phase 9).
+
+`TrackNewAudioAttributes` is sent after the authentication and repeated every 0.5 s, up to 40 times, until the stereo acks it. Until the first ack it is sent again when play starts and when the track changes. The car stereo acks once per connection; after that it is not sent again.
+
+**Audio level.** `ipod-audio` sends the phone's audio `IPOD_AUDIO_GAIN_DB` lower (default -6 dB), through the ALSA PCM `ipod_gain` (`/etc/alsa/conf.d/60-ipod-gain.conf`). The car stereo clipped loud songs at the full level. The decoded Bluetooth stream itself does not clip (PLAN.md, Phase 10).
+
+### 6.3 Reconnecting to the phone
+
+iPhones do not always connect to an audio device that was off, and BlueZ retries only after a lost link. So the bridge does it. One detail matters: `Device1.Connect()` lets BlueZ choose the bearer. For a dual-mode phone after a restart it scans for Low Energy, never pages the phone, and stays `In Progress` for good (btmon showed only LE scan commands). `Device1.ConnectProfile("0000110a-...")` (the phone's A2DP source service) forces the classic connection: the radio pages at once and the phone is connected in about a second.
+
+Checked on 09/10/2026: a disconnect from the Pi side was undone in 3 s, and a cold reboot ended with the phone connected 27 s later, with nobody touching it. The log line `connected to the phone` is the Pi's own request.
+
+After a connection, the phone's player may have no track data until it plays. If the data arrives after the stereo connected, the bridge counts it as a new track and sends a track index notification, so the stereo asks again.
+
+### 6.4 The full-speed USB audio bug
+
+The kernel's `f_uac1` uses **one descriptor list for full and high speed**, with `bInterval = 4`. That is right for high speed. At full speed, which every car stereo here uses, `bInterval` must be 1. `u_audio` plans its packets from it: `1000 / (1 << (bInterval - 1))` is 125 packets per second, each meant for 352 frames. The stereo got isochronous packets of **0 or 200 bytes**, about 56% of real time. Bluetooth audio then piled up in BlueALSA (`PCM overrun`) while the stereo side ran dry (`underrun`). The sound was "extremely jittery".
+
+The fix is `uac1-fs/f_uac1-fullspeed.patch` (42 lines): full-speed copies of the two isochronous endpoint descriptors with `bInterval = 1` and no synchronisation type, like the iPhone. `install-uac1-fs.sh` fetches `f_uac1.c`, `u_audio.c`, `u_audio.h`, `u_uac1.h` and `uac_common.h` from the Raspberry Pi kernel at a pinned commit, checks SHA-256, applies the patch and builds both modules with DKMS into `updates/dkms`. DKMS rebuilds them for a new kernel, which needs the network once.
+
+Measured with `audio-test.sh` (a 440 Hz tone through the gadget, recorded on the Pi 3, no Bluetooth):
+
+| | discontinuities per second | silent gaps |
+|---|---|---|
+| stock kernel module | about 15, for the first 5 to 9 s | 0 |
+| patched module | 0 | 0 |
+
+Also set in `ipod-gadget`: no mute and volume controls on the capture side (their defaults add an interrupt endpoint that the iPhone does not have), and `req_number=16` for margin. To go back to the stock module: `dkms remove usb_f_uac1_fs/<version> --all && depmod -a`, then reboot.
+
+### 6.5 Delay reporting
+
+The phone delays its video by the delay that the audio sink reports: A2DP delay reporting (AVDTP 1.3, the signal `DELAY_REPORT`), as AirPods do. The iPad offers it on all its stream endpoints (`DelayReporting: true`), and BlueZ shows the stream's `Delay` property. BlueALSA 4.3.1 only reads that property (for a remote speaker's delay) and never sets it for a sink, so the iPad got 0.
+
+| Part | How |
 |---|---|
-| `sniffer-dumpcap` | `dumpcap -i usbmon<bus> -b filesize:500000`, a ring of 500 MB pcapng files |
-| `sniffer-udcwatch` | Logs UDC state and speed changes to `udc.log` every 0.2 s |
-| `sniffer-proxy` | `capture _proxyloop`, which supervises `usb-proxy` |
+| Report | `ipod-bridge` sets `org.bluez.MediaTransport1.Delay` (1/10 ms). BlueZ sends `DELAY_REPORT` at once. BlueZ lets other programs set it only while BlueALSA does not hold the transport, so the bridge sets it when the transport is idle, for example right after the phone connects. BlueZ sends the value again for a new stream configuration. |
+| Value | `IPOD_AUDIO_LATENCY_MS` + the measured rest of the pipeline (`pipelineExtra` in `bridge/main.go`) + `IPOD_EXTRA_DELAY_MS`. |
+| Constant delay | `alsaloop` holds the delay between the BlueALSA PCM and the gadget at `IPOD_AUDIO_LATENCY_MS`, and resamples (`-S 4`) the small difference between the phone's clock and the stereo's USB clock. `bluealsa-aplay` kept its buffer full but let BlueALSA's pipe (up to 1.5 s) take up the difference, so its delay could grow during a drive. |
+| No feedback | The BlueALSA ALSA plugin adds BlueALSA's `Delay`, which includes the reported value, to its capture delay. `alsaloop` would then cut its buffer by that much. The bridge sets BlueALSA's `DelayAdjustment` to minus the reported value. |
 
-The `_proxyloop` supervisor:
+Checked on 09/10/2026 with `btmon`: the Pi sends `90 0d 04 13 89` (`DELAY_REPORT`, endpoint 1, 500.1 ms) and the iPad answers `92 0d` (accept).
 
-- Starts `usb-proxy` with `setsid`. On device disconnect, `usb-proxy` sends SIGINT to its whole process group, which would also kill the loop.
-- Restarts `usb-proxy` when the device's USB device number changes to a new non-zero value, which means re-enumeration. The number reads 0 for a moment during a reset; that is not a re-enumeration.
-- Adds a UTC timestamp (`HH:MM:SS.mmmZ`) to each line of `proxy.log` with a Perl filter. The filter must stay unbuffered (`$| = 1`), and `usb-proxy` runs under `stdbuf -oL -eL`.
+**Measuring the Pi's delay.** `latency-test.sh` needs the Pi 5 on the Pi 3 by USB (an `iap-sink` session) and the phone connected. It plays the phone over AVRCP for 60 s and captures:
 
-Environment options for `capture start`:
+- `btmon` on the Pi 5: the arrival of each Bluetooth audio packet (RTP with SBC frames), on the Pi 5 clock.
+- `usbmon` on the Pi 3: each isochronous audio packet that leaves the gadget, on the Pi 3 clock.
+- The `ipod-bridge` trace: the HID reports of the iAP session, which `usbmon` also has. The Pi 3 sends a report before the Pi 5 reads it, and the Pi 5 writes one before the Pi 3 gets it. That bounds the offset between the two clocks, to a fraction of a millisecond.
+
+`latency/analyze.py` decodes the SBC frames with ffmpeg, finds each 0.25 s piece of sound in the USB audio, and gives the delay of the first sample of each Bluetooth packet (a packet's samples all arrive at once) and the average sample delay, which is the value to report. `latency/selftest.py` builds a capture with a known delay and clock offset and checks the result (it finds the offset to 0.05 ms and the delay to the expected value).
+
+## 7. Settings and tools
+
+`/etc/ipod-bridge.conf` (restart with `systemctl restart ipod-bridge`):
 
 | Variable | Default | Use |
 |---|---|---|
-| `PROXY_RESET` | `1` | `1` resets the device when `usb-proxy` starts. **Needed for the stereo:** a device left mid-authentication ignores a new `IdentifyDeviceLingoes`. **Use `0` for a Mac host:** its USB mode change makes a reset re-enumerate the device in a loop. Note: the `capture` help text still says "default: no reset". That text is wrong; the code default is 1. |
-| `PROXY_ARGS` | `--iso_batch_size=4` | Extra `usb-proxy` options. 4 gave the fewest audio drops: 8 gave 1.1%, 4 gave 0.6%, 2 gave 2.5%, all on one core. For a Mac host, add `--auto_remap_endpoints`: macOS selects configuration 6, which needs all 14 dwc2 endpoints. |
-| `PROXY_VERBOSE` | `1` | Number of `-v` flags. |
-| `INJECTION_FILE` | the rules file above | Set to empty to disable all rules. |
-
-Files in a session folder:
-
-| File | Content |
-|---|---|
-| `session.txt` | Start time, kernel, OS, `usb-proxy` commit, `raw_gadget` version, device ID, speed and options |
-| `iphone-lsusb-v.txt`, `lsusb-t.txt` | Device descriptors, written before the capture starts |
-| `usb_NNNNN_<time>.pcapng` | usbmon capture of the host side: Pi to Apple device, high speed |
-| `proxy.log` | `usb-proxy` log with timestamps: the gadget side, which usbmon cannot see |
-| `udc.log` | UDC state (`not attached`, `configured`, …) and speed |
-| `marks.tsv` | Marks |
-
-The program names say "iPhone" for any Apple device, including the iPad.
-
-### 5.5 Deploying a change to the Pi
-
-Stop a running session first with `capture stop`. Then copy the files and rebuild. The rebuild steps are the same as in `setup.sh`:
+| `IPOD_NAME` | empty | Name that the stereo gets. Empty: the phone's Bluetooth name. |
+| `IPOD_BT_NAME` | `Pi iPod` | Bluetooth name of the Pi, as the phone shows it. |
+| `IPOD_AUTH_TIMEOUT` | `70s` | When the iPod passes the authentication without a signature. |
+| `IPOD_RECONNECT_EVERY` | `10s` | The Pi connects to the paired phones by itself at this interval. `0` switches it off. |
+| `IPOD_PAIR_AFTER` | `60s` | The pairing window opens by itself when no phone is connected this long after start. `0` switches it off. |
+| `IPOD_AUDIO_GAIN_DB` | `-6` | The phone's audio goes to the stereo this many dB lower. `0`: unchanged. Restart `ipod-audio` after a change. |
+| `IPOD_AUDIO_LATENCY_MS` | `500` | `alsaloop`'s fixed delay. The reported delay follows it. Restart `ipod-audio` and `ipod-bridge`. |
+| `IPOD_EXTRA_DELAY_MS` | `0` | Added to the reported delay, for the stereo's own delay (not measured). |
+| `IPOD_DELAY_REPORT` | on | `0`: do not report the delay to the phone. |
+| `IPOD_AUDIO_PLAYER` | `alsaloop` | `aplay`: the earlier `bluealsa-aplay`, whose delay can grow during a drive. |
+| `IPOD_DEBUG`, `IPOD_TRACE_HID` | off, on | More log lines. A raw HID report trace. |
 
 ```bash
-rsync -a --exclude .DS_Store pi/ root@pi5-sniffer.local:/opt/sniffer/pi/
+ipod-bridge ctl status        # what the stereo and the phone report, packet counts
+ipod-bridge ctl devices       # paired phones
+ipod-bridge ctl pair [secs]   # open the pairing window
+ipod-bridge ctl forget all|<address>|<name>   # remove a pairing (and open the window if no phone is left)
+ipod-bridge ctl toggle|play|pause|next|prev    # press the phone's buttons (AVRCP)
+journalctl -u ipod-bridge -f
 ```
+
+Packet traces are in `/var/lib/ipod-bridge/traces/session-*.jsonl` (`A>D` comes from the stereo, `D>A` is sent by the Pi).
+
+## 8. Tests
 
 ```bash
-ssh root@pi5-sniffer.local 'install -m 755 /opt/sniffer/pi/capture.sh /usr/local/bin/capture'
+./build.sh                       # gofmt, vet, tests with the race detector, arm64 build
+./audio-test.sh [seconds]        # USB audio path without Bluetooth (needs the Pi 3 test stereo)
+./latency-test.sh [seconds]      # the Pi's delay, Bluetooth in to USB out (section 6.5)
+uv run latency/selftest.py       # checks the latency analysis with a made-up capture
+tools/test-stereo/build.sh       # the test stereo's tests and arm64 build
+uv run --project tools/decode pytest tools/decode/tests   # the decoder's tests
+ssh root@pi3-sink.local stereo playpause    # stereo buttons on the bench
+ssh root@pi3-sink.local stereo next
+ssh root@pi3-sink.local stereo back
 ```
 
-```bash
-ssh root@pi5-sniffer.local 'cd /opt/sniffer/usb-proxy && git checkout -q -f a08301d21d6ba1036cddbcb1a4314578cbc4a274 && for p in /opt/sniffer/pi/patches/usb-proxy-*.patch; do git apply "$p" || exit 1; done && make -j4'
-```
+The Go tests run the bridge against a scripted stereo and a fake phone, over the same report framing as `/dev/hidg0`: authentication, notifications, every control mapping, stepwise metadata, and the iPad's exact reply bytes.
 
-`git checkout -f` removes the old patches, so the new set applies cleanly. Do not re-run `setup.sh` for a small change: it also runs `apt full-upgrade`.
+## 9. Protocol facts
 
-To check that the Pi matches this repo, use an rsync dry run:
-
-```bash
-rsync -ani --exclude .DS_Store pi/ root@pi5-sniffer.local:/opt/sniffer/pi/
-```
-
-### 5.6 Bluetooth iPod mode
-
-The Pi 5 can also be an iPod that plays the phone's Bluetooth audio, instead of relaying a USB iPhone. It sends the track data over iAP1 and turns the stereo's play, pause and next into AVRCP commands for the phone. It uses the same USB-C port as the relay, so `ipod-mode bt` and `ipod-mode relay` switch between them. See [pi/ipod/README.md](pi/ipod/README.md). The Pi 3 sink is its test stereo.
-
-## 6. Running sessions
-
-### 6.1 A car session
-
-1. Pi on bench power in the car. Key in ACC. SSH in over Wi-Fi.
-2. Plug the Apple device into a black USB-A port. Unlock it.
-3. Run `capture start car-NN`. Wait for "Connect the Pi's USB-C cable to the stereo now."
-4. Plug the taped cable into the stereo. Select the USB source on the stereo.
-5. Watch `tail -f /root/sessions/current/proxy.log` and `cat /root/sessions/current/udc.log`. `configured` with `full-speed` is normal.
-6. Before each action, run `capture mark "<action>"`.
-7. Run `capture stop`.
-8. On the Mac, copy the session:
-
-```bash
-rsync -a root@pi5-sniffer.local:/root/sessions/<session-dir> sessions/
-```
-
-9. Run `poweroff` on the Pi before you cut the bench power.
-
-In `car-10`, audio data started about 4 s after the stereo connected.
-
-### 6.2 A Mac test session
-
-```bash
-PROXY_RESET=0 PROXY_ARGS=--auto_remap_endpoints capture start mac-NN
-```
-
-The Mac selects configuration 6, which needs all 14 dwc2 endpoints. Image Capture lists photos, and iPhone USB networking works. Finder does not show the device, and the device asks for Trust more than once.
-
-### 6.3 Troubleshooting
-
-| Symptom | Likely cause and action |
-|---|---|
-| `capture start` says a session is still running | A unit from an earlier session is still active. Run `capture stop`. |
-| Stereo shows "Unsupported" | Look in `proxy.log` and `udc.log`. Past causes were high-speed descriptors (patch 04), a late `SET_CONFIGURATION` ack (patch 06), and a truncated HID descriptor with 1-byte probes (patch 07 and the stall rule). |
-| Stereo stuck on "Reading" | Check that iAP traffic flows: decode the session or read `proxy.log`. In `car-10`, on connection 3, the stereo never answered `GetDevAuthenticationInfo`. The cause is not known. Unplug and plug in again. |
-| All USB-A ports turn off | Over-current. A host sent the Apple charge request. Check that the ignore rule is loaded. |
-| Relay loops: connect, disconnect, connect | A device re-enumeration or a reset loop. For a Mac host use `PROXY_RESET=0`. |
-| `usb-proxy` does not stop, process in state `D` | It is stuck in the kernel (`driver_attach`). Only a reboot clears it. |
-| Audio glitches | Check that 4 cores are on (`nproc`) and that `--iso_batch_size=4` is set. Count `isochronous timing error` lines in `proxy.log`. |
-| No track title on the stereo | Normal for this stereo. |
-
-## 7. The decoder
-
-### 7.1 Use
-
-```bash
-uv run --project decode iap-decode sessions/<session-dir>
-```
-
-It accepts a session folder or pcapng files. Options: `-o DIR` sets the output folder, and `--no-audio` skips the WAV files. A run on `car-10` (49 MB) takes about 2 s.
-
-Output goes to `<session-dir>/decoded/`:
-
-| File | Content |
-|---|---|
-| `timeline.txt` | One line per event: UTC time, seconds from start, direction, layer, name, fields. A summary follows the events. |
-| `timeline.jsonl` | The same events, with raw bytes in hex |
-| `summary.json` | Explained and unexplained transfer counts, iAP1 command counts per direction, audio streams, relay events |
-| `audio-NN.wav` | One file per audio stream |
-| `accessory-cert-N.p7b` | The stereo's MFi certificate, PKCS#7 DER, joined from its sections. **Private.** |
-
-Directions: `A>D` is host side to Apple device, and `D>A` is the reverse. "Host side" is the stereo, or the relay itself: the relay sends its own descriptor requests at start. Layers: `usb`, `hid`, `iap1`, `iap2`, `audio`, `relay` (from `proxy.log`), `udc` (from `udc.log`), `mark`.
-
-Tests and lint:
-
-```bash
-uv run --project decode pytest decode/tests
-```
-
-```bash
-uvx ruff check decode
-```
-
-### 7.2 Design
-
-| Module | Layer | Notes |
-|---|---|---|
-| `usbmon.py` | L0 | Reads pcapng blocks and the 64-byte usbmon header (link type 220; 189 is also handled) without `tshark`. `tshark` is not installed on the Mac. Pairs submit and complete events by URB ID. For iso, it splits the data with the iso descriptors. A transfer's time is the submit time for OUT data and the completion time for IN data. |
-| `usbdesc.py` | — | Parses configuration descriptors, string descriptors and setup packets. Names standard, HID, UAC1, hub and Apple vendor requests. |
-| `hid.py` | L1 | Report = `[ID][LCB][payload]`. Reassembles by LCB per direction. Reports lost fragments. Report lengths come from the data, so no table is needed to decode. |
-| `iap1.py` | L2, L3 | Finds iAP1 packets, the iAP2 detect sequence and iAP2 link packets. Checks checksums. Tracks the transaction-ID state: IDs start after `StartIDPS`. Ignores zero padding. |
-| `lingoes.py` | L4 | Command names and field decoders for General, Simple Remote, Display Remote, Extended Interface and Digital Audio. Unknown commands show as hex and count as unexplained. |
-| `audio.py` | L5 | WAV per stream. Sample rate from UAC1 `SET_CUR`, else from `TrackNewAudioAttributes`, else 44,100 Hz. A pause shorter than 5 s becomes silence, so the file keeps wall-clock time; a longer pause starts a new file. Reports pauses longer than 20 ms. |
-| `decoder.py` | — | Runs the layers. Uses the captured configuration descriptors to find the HID and audio endpoints. A port reset or `SET_CONFIGURATION` flushes the HID state and ends the audio stream. Root hub requests are counted; port resets are shown. |
-| `sessionfiles.py` | — | Reads `marks.tsv`, `udc.log` and `proxy.log`. Iso timing errors that come within 50 ms of each other become one event. |
-| `output.py`, `cli.py` | — | Text, JSON Lines, summary, command line. |
-
-Limits:
-
-- The command tables come from public reverse engineering, because Apple's iAP spec is confidential. Each table needs checks against captures. The `car-10` decodes are self-consistent: replies match requests, and track-change notifications match the title requests.
-- iAP2 is detected but not decoded. This stereo does not use it.
-- One usbmon bus per capture. Device number 1 is taken to be the root hub.
-- usbmon sees only the Pi to Apple device side. The relay re-packetises HID, so report boundaries in the capture differ from what the stereo sent and received. The iAP packets are the same.
-- No golden-file tests yet.
-
-## 8. Protocol facts learned
-
-### 8.1 Apple device descriptors
+### 9.1 Apple device descriptors
 
 The iPhone and the iPad have the same layout: 4 configurations. Linux selects configuration 1 by itself; the stereo selects configuration 2.
 
@@ -347,7 +277,7 @@ The iPhone and the iPad have the same layout: 4 configurations. Linux selects co
 - HID report descriptor: **208 bytes at high speed, 96 bytes at full speed.** You cannot read the full-speed one from a device connected at high speed. Patch 07 contains it; the source is `oandrew/ipod-gadget`.
 - After Apple "set USB mode" (`0xC0/0x52`), the device re-enumerates with 6 configurations. After a reset, Linux compares the descriptors; a change makes it a new device.
 
-### 8.2 iAP over HID
+### 9.2 iAP over HID
 
 - Report format: `[report ID][link control byte (LCB)][payload, zero-padded to the report count]`. The count includes the LCB but not the ID.
 - LCB bit 0 = this report continues a packet. LCB bit 1 = more reports follow. So `0x00` is a single report, `0x02` first, `0x03` middle, `0x01` last.
@@ -363,14 +293,14 @@ The relay re-packetises each iAP packet between the tables. Toward the device it
 
 A full-speed host must never get the high-speed table. With it, the stereo tried to send its certificate in report 0x15, a 256-byte `SET_REPORT`, and then sent zero-length `SET_REPORT`s in a loop. The working explanation is an 8-bit length field in the stereo. It is not proven.
 
-### 8.3 iAP1 framing
+### 9.3 iAP1 framing
 
 - Packet: `55 len lingo cmd [txid16] data… checksum`. Large packet: `55 00 len16 …`. Over USB there is no `FF` sync byte.
 - Checksum: two's complement of the byte sum from the length byte(s) to the end of the data.
 - The Extended Interface lingo (0x04) has 2-byte command IDs; all other lingoes have 1-byte IDs.
 - This stereo uses the old identification (`IdentifyDeviceLingoes`, not IDPS), so it uses no transaction IDs.
 
-### 8.4 How the stereo behaves
+### 9.4 How the stereo behaves (relay sessions, 08/10/2026)
 
 Per connection, from `car-10`:
 
@@ -392,20 +322,31 @@ Other stereo facts:
 - It shows "TR nn" and the elapsed time. The DISP button does nothing visible. It shows no title, even with a direct connection.
 - It sends `PlayControl` "end fast forward/rewind" often: 21 times in `car-10`.
 
-### 8.5 Mac host behaviour
+Learned by the bridge in the car (09/10/2026), with no relay in between:
 
-- macOS sends the Apple charge request `0x40/0x40` with `wValue 0x0960` (2400 mA) and `wIndex 0x076c` (1900 mA). Within about 6 ms the iPhone exceeded the Pi's limit, and all USB-A ports reported over-current.
-- macOS sends "set USB mode 4" (`0xC0/0x52`) and selects configuration 6.
-- macOS suspends the bus after about 2 minutes idle.
+- When the iPod says "stopped", the stereo starts play itself, about 3 s after it connects: `PlayCurrentSelection(0xFFFFFFFF)`, then `PlayControl` toggle. In `car-10` the iPad was paused with a track, so this never showed there.
+- An error reply to any command shows on the display: `Error 2` or `Unsupported` (status 2 is "command failed", status 5 "unknown ID"; the mapping to the text is likely but not proven). After errors the stereo may stop polling for minutes.
+- A stopped iPod with an empty title and length 0 also gives `Unsupported`.
+- Next is `SetCurrentPlayingTrack(index + 1)`. The stereo wraps it to 0 at the last track count it read, and it reads the count before the index changes. Quick presses add up to one index several tracks away.
+- Back, 2 s or more into a track: toggle, `PlayControl` 0x04 (previous track), 1.2 s later `SetCurrentPlayingTrack` with the same index, end fast forward/rewind, toggle again if paused. Earlier in a track: `SetCurrentPlayingTrack(index - 1)`.
+- The stereo acks `TrackNewAudioAttributes` once per connection, when it is ready for audio. It sends UAC1 `SET_CUR` for the sample rate to endpoint 0x81.
+- The signature still comes about 57 s after the challenge, as in `car-10`.
+- The stereo clips loud songs at the full digital level of the Bluetooth stream. The decoded stream itself does not clip.
 
-## 9. Quirks and gotchas
+## 10. Quirks and gotchas
 
-Relay and USB:
+The bridge:
 
-- The gadget framework acks OUT control data before user space reads it, so the relay cannot pass a device STALL for such a request (R12, patch 05).
-- dwc2 gives isochronous timing errors (`ENODATA`, errno 61) on some audio packets. One core made this much worse. These errors happen on the stereo side, so `usbmon` cannot see them; only `proxy.log` shows them.
-- `usb-proxy` hangs when the device re-enumerates, and it kills its own process group (see 5.4).
-- systemd needs `WorkingDirectory` to exist before a unit starts; `capture` creates `/run/sniffer` first.
+- Writing `function_name` in the UAC1 configfs function hangs on kernel 6.18. `ipod-gadget` does not set it, so the ALSA card is `UAC1Gadget`.
+- `echo` adds a newline to the HID report descriptor (97 bytes in place of 96). `ipod-gadget` writes it with `printf '%s'`.
+- The DKMS build of the UAC1 modules also needs `uac_common.h`.
+- BlueZ is not ready for a moment after a restart or an rfkill change (`set Powered=true: Failed`). The bridge retries 10 times, 1 s apart.
+- When the host disconnects, a read of `/dev/hidg0` fails with `ENOMEM` and the kernel logs `End Point Request ERROR: -108`. The bridge ends the session and waits for the UDC state `configured`.
+- `f_uac1` acks the stereo's endpoint `SET_CUR` (sample rate, endpoint 0x81) but does not apply it: it compares hard-coded endpoint numbers. That does no harm at 44.1 kHz.
+- When nothing plays into the gadget, it sends silence: the kernel clears the buffer when playback stops.
+- The BlueALSA ALSA plugin prints debug lines (`D: bluealsa-pcm.c`) into the `ipod-audio` journal.
+- The Pi 5 kernel has no dynamic debug. To watch the stereo's USB control requests, enable the `gadget` events in `/sys/kernel/tracing` (`usb_ep_queue` on ep0, `usb_ep_enable`, `usb_gadget_set_state`).
+- `btmon` text output is lost when `timeout` kills it: capture with `btmon -w` and read back with `btmon -r`. A `btmon` that starts after the channels are open cannot name AVDTP signals; look for the raw bytes.
 
 Pi OS:
 
@@ -420,15 +361,32 @@ Tooling on the Mac:
 - Perl one-liners with braces broke when sent through SSH quoting. Small Python scripts were more reliable for edits.
 - `pkill -f "capture start"` once killed the agent's own SSH shell. Anchor the pattern, for example `pkill -f '^bash /usr/local/bin/capture'`.
 - WebSearch refused some USB and MFi questions for the main model. The user asked for web research to go to an Opus subagent.
+- In zsh, a variable that holds several SSH options does not split. Use a bash array: `O=(-o BatchMode=yes)`, then `ssh "${O[@]}"`.
+- The Mac's `rsync` has no `--chown`. The deploy scripts copy as root instead.
+- `ffmpeg` (Homebrew) has the SBC codec; `latency/analyze.py` and `latency/selftest.py` use it. `tshark` is not installed.
 
-## 10. Data and privacy
+## 11. Not verified
+
+- **Clipping.** Less after the fixed -6 dB, but some remains (third car run). `IPOD_AUDIO_GAIN_DB` can go lower.
+- **`alsaloop` with a real USB host.** Deployed with no host attached. Its sound, its resampling and its behaviour when the phone pauses are not checked yet.
+- **The Pi's measured delay.** The report is `IPOD_AUDIO_LATENCY_MS` until `latency-test.sh` has run on the bench (section 6.5). The stereo's own delay is not in it.
+- **That iOS uses the report.** The iPad accepts it (AVDTP accept). Whether its video then matches the car's sound is not checked.
+- **The iPad's volume.** It has no effect on the sound (absolute volume with a fixed gain). Plain Bluetooth has no documented way to disable the iPad's slider; a greyed-out slider is reported with CarPlay (iAP2, Apple authentication chip). Left as it is, by decision.
+- **Wi-Fi next to Bluetooth.** Both share the radio. A busy Wi-Fi link may disturb the audio.
+- **Skips more than one track** are sent as several `Next` or `Previous` commands, 0.3 s apart. Not tried with a phone.
+- **"Previous" at the start of a track.** The phone restarts the track when it is more than about 3 s in, the stereo when it is more than about 2 s in. Between the two, one press can go a track back where the stereo meant a restart.
+- **One phone at a time.** The bridge follows a playing player first, then the latest.
+- No artwork, no playlist browsing, no fast forward end event (BlueZ has no "release").
+
+## 12. Data and privacy
 
 | Place | Content |
 |---|---|
-| Pi `/root/sessions/` | All 28 sessions: `phase3-mac-1` to `-10`, `car-1` to `car-15`, and others. |
-| Mac `sessions/phase2-20261008-194356/` | iPhone descriptors only |
 | Mac `sessions/20261008-221642-car-10/` | Complete car session (61 MB) and `decoded/`. **The main data set for the decoder.** |
 | Mac `sessions/20261008-223159-car-15-4cores/` | **Partial.** The pcapng is missing, because the Pi went offline during the copy. `proxy.log` and the small files are present. |
+| Pi 5 `/var/lib/ipod-bridge/traces/` | Every iAP packet of each bridge session with the stereo, and the raw HID reports. Holds the stereo's certificate. |
+| Pi 3 `/var/lib/iap-sink/traces/` | The same for the test stereo. |
+| Mac `out/latency-*/` | Bluetooth and USB captures of the delay measurement: audio, HID reports, the stereo's certificate. |
 
 Treat all session data as private. Never publish it or upload it to an external service.
 
@@ -438,32 +396,21 @@ Treat all session data as private. Never publish it or upload it to an external 
 
 The `decoded/` folders hold the same data in readable form.
 
-## 11. Open work
-
-1. **Copy `car-15`.** When the Pi is on again, copy the pcapng, then decode it:
-
-```bash
-rsync -a root@pi5-sniffer.local:/root/sessions/20261008-223159-car-15-4cores sessions/
-```
-
-2. **Check the Pi's health** after the hard power cut (section 9).
-3. **Golden captures:** run the Phase 5 action list in the car (PLAN.md, Phase 5 step 6), with a `capture mark` before each action. Then add golden-file tests: a short trimmed capture and its expected timeline.
-4. **iPhone in the car:** re-test the iPhone through the final relay. Only the iPad has worked there so far.
-5. **Investigate** the connection where the stereo never sent its certificate, and the 56 s signature delay. Is the delay normal for this stereo with a direct connection? A direct capture needs a passive analyser; see PLAN.md section 10.
-6. **Bluetooth iPod in the car.** It passed on the bench with the Pi 3 as the stereo (`pi/ipod/README.md`, section 8). It has not run with the real stereo.
-7. **Optional:** usbmux pairing through the relay (not needed for the stereo). An ADuM4160 USB isolator could replace the full-speed translation: it would make the device enumerate at full speed on the Pi.
-
-## 12. Working with this user
+## 13. Working with this user
 
 - Write replies in ASD-STE100 (Simplified Technical English), with short sentences. Use the future tense for work that you have not done yet.
 - Dates are dd/mm/yyyy. Units are metric. The user is in New Zealand: the Pi runs `Pacific/Auckland`, and the logs use UTC.
 - The user does the physical work: cables, power and the car. Say exactly what to plug in or measure, and wait for confirmation.
 - Ask before you do anything that can damage hardware or the car battery.
+- Ask clarifying questions before decisions, also small ones. The user decides design choices; the PLAN lists the decisions so far.
+- The repository is public. Keep phone names, Bluetooth addresses, network names and secret references out of it.
 
-## 13. References
+## 14. References
 
 - `xairy/raw-gadget` and `AristoChen/usb-proxy` on GitHub: the relay base.
 - `oandrew/ipod` and `oandrew/ipod-gadget` (Go): iAP1 over HID framing, lingo tables, and the full-speed HID report descriptor (`gadget/ipod.h`).
 - Rockbox `apps/iap/`: an iPod-side iAP1 implementation.
 - Linux `drivers/usb/misc/apple-mfi-fastcharge.c`: the Apple charge request.
 - Raspberry Pi white paper RP-009276-WP: Pi 5 USB gadget mode.
+- BlueZ 5.82 (`profiles/audio/transport.c`, `avdtp.c`, `avrcp.c`) and BlueALSA 4.3.1 (`src/asound/bluealsa-pcm.c`, `utils/aplay/`): read for delay reporting and volume.
+- Bluetooth Accessory Design Guidelines for Apple Products: AVRCP Absolute Volume, and the volume behaviour of iOS.

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build ipod-bridge and install the Bluetooth iPod on the Pi 5 over SSH. Runs on the Mac.
-# Usage: pi/ipod/deploy.sh [host]   (default host: pi5-sniffer.local). Then on the Pi: ipod-mode bt
+# Usage: ./deploy.sh [host]   (default host: pi5-sniffer.local). Then on the Pi: ipod-mode bt
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"

@@ -4,7 +4,7 @@
 # ///
 """Check analyze.py with a made-up capture of known delay and clock offset. Needs ffmpeg (SBC encoder).
 
-Usage: uv run pi/ipod/latency/selftest.py
+Usage: uv run latency/selftest.py
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import struct
 import subprocess
 import sys
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -84,7 +84,7 @@ def main() -> None:
 
         events = []
         n, m, acc = 0, 0, 0
-        urb, iso, start = bytearray(), [], 0.0
+        urb, iso = bytearray(), []
         while n + 45 < len(out):
             acc += 44100
             size = acc // 1000
@@ -117,7 +117,7 @@ def main() -> None:
         (cap / "usb.pcap").write_bytes(pc)
         with open(cap / "bridge-trace.jsonl", "w") as f:
             for t, raw in trace:
-                ts = datetime.fromtimestamp(t, timezone.utc).isoformat().replace("+00:00", "Z")
+                ts = datetime.fromtimestamp(t, UTC).isoformat().replace("+00:00", "Z")
                 f.write(json.dumps({"dir": "?", "name": "hid-report", "raw": raw.hex(), "t": ts}) + "\n")
 
         subprocess.run([sys.executable, str(HERE / "analyze.py"), str(cap)], check=True)

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Test and build ipod-bridge for the Pi 5 (Linux arm64) in Docker. Output: pi/ipod/out/ipod-bridge
+# Test and build ipod-bridge for the Pi 5 (Linux arm64) in Docker. Output: out/ipod-bridge
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"

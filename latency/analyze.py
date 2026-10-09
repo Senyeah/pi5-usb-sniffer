@@ -8,7 +8,7 @@ The delay runs from the arrival of a Bluetooth audio packet at the Pi 5 (btmon, 
 that carries the same sound to the stereo (usbmon on the Pi 3 sink, Pi 3 clock). The HID reports of the iAP
 session are on both sides (the ipod-bridge trace and usbmon) and give the offset between the two clocks.
 
-Usage: uv run pi/ipod/latency/analyze.py <capture dir>   (needs ffmpeg with the SBC decoder)
+Usage: uv run latency/analyze.py <capture dir>   (needs ffmpeg with the SBC decoder)
 """
 
 from __future__ import annotations
@@ -24,8 +24,8 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "decode" / "src"))
-from iap_decode.usbmon import LINKTYPE_USB_LINUX_MMAPPED, XFER_CTRL, XFER_INT, XFER_ISO, parse_record  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools" / "decode" / "src"))
+from iap_decode.usbmon import XFER_CTRL, XFER_INT, XFER_ISO, parse_record  # noqa: E402
 
 RATE = 44100
 BTSNOOP_EPOCH_US = 0x00DCDDB30F2F8000  # btsnoop counts microseconds from the year 0
@@ -196,7 +196,8 @@ def clock_offset(events, dev: int, trace: Path) -> tuple[float, float]:
                 if r == e.data[: len(r)] and abs(t5 - e.ts) < 0.25:
                     lower.append(t5 - e.ts)  # the Pi 3 got it after the Pi 5 wrote it
     if not upper or not lower:
-        raise SystemExit(f"cannot match HID reports for the clock offset ({len(upper)} to the Pi 5, {len(lower)} from it)")
+        raise SystemExit(f"cannot match HID reports for the clock offset "
+                         f"({len(upper)} to the Pi 5, {len(lower)} from it)")
     # Repeated polls match more than one report: keep the tightest consistent bounds.
     hi, lo = min(upper), max(lower)
     if lo > hi:
@@ -262,7 +263,8 @@ def main() -> None:
         for r in res:
             f.write(f"{r[0]:.6f},{r[1] * 1000:.3f},{r[2]:.4f}\n")
     (cap / "result.json").write_text(json.dumps({
-        "windows": len(d), "average_sample_ms": round(avg, 2), "median_ms": round(float(np.median(d)), 2), "mean_ms": round(float(d.mean()), 2),
+        "windows": len(d), "average_sample_ms": round(avg, 2), "median_ms": round(float(np.median(d)), 2),
+        "mean_ms": round(float(d.mean()), 2),
         "min_ms": round(float(d.min()), 2), "max_ms": round(float(d.max()), 2), "std_ms": round(float(d.std()), 2),
         "trend_ms_per_min": round(float(slope), 3), "clock_offset_ms": round(offset * 1000, 3),
         "clock_offset_uncertainty_ms": round(width * 1000, 3)}, indent=2) + "\n")

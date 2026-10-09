@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Measure the USB audio path of the iPod gadget without Bluetooth. Runs on the Mac.
 # The Pi 5 plays a 440 Hz tone into the gadget. The Pi 3 (the stereo) records it and counts the glitches.
-# Usage: pi/ipod/audio-test.sh [seconds]    (default 20)
+# Usage: ./audio-test.sh [seconds]    (default 20)
 set -euo pipefail
 
 SECS=${1:-20}

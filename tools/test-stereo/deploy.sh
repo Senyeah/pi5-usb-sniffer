@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build iap-sink and install it on the Pi 3 over SSH. Runs on the Mac.
-# Usage: [ACCESSORY_CERT_FILE=path/to/accessory-cert-N.p7b] sink/deploy.sh [host]   (default host: pi3-sink.local)
+# Usage: [ACCESSORY_CERT_FILE=path/to/accessory-cert-N.p7b] tools/test-stereo/deploy.sh [host]   (default host: pi3-sink.local)
 # The certificate is private. It goes to /etc/iap-sink on the Pi and never into git.
 set -euo pipefail
 

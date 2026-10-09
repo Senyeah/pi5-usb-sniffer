@@ -2,7 +2,7 @@
 # Measures the Pi 5's audio delay: Bluetooth packet in (btmon on the Pi 5) to USB packet out (usbmon on the
 # Pi 3 sink). Runs on the Mac. Needs the Pi 5 on the Pi 3 by USB with an iap-sink session, and the phone
 # connected to the Pi 5. It starts the phone's player over AVRCP and pauses it at the end.
-# Usage: pi/ipod/latency-test.sh [seconds]   (default 60). Output: pi/ipod/out/latency-<time>/
+# Usage: ./latency-test.sh [seconds]   (default 60). Output: out/latency-<time>/
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
