@@ -193,6 +193,14 @@ func (srv *server) session(ctx context.Context, cfg config) error {
 	if err != nil {
 		return err
 	}
+	if srv.claims != nil {
+		// Claim the port again as soon as the drivers are bound. A device that appears at once after this one
+		// (the Pi 5 restarts its gadget) must not be configured by the kernel. A claim does not touch this device.
+		if !waitBound(dev, cfg.Config, 5*time.Second) {
+			slog.Warn("not all interfaces have a driver yet", "path", dev.Name)
+		}
+		srv.claims.reclaim(dev.Name)
+	}
 	f, err := os.OpenFile(node, os.O_RDWR, 0)
 	if err != nil {
 		return err

@@ -373,6 +373,7 @@ func (s *stereo) queryMeta() {
 	}
 	s.metaTrack = s.track
 	s.enqueue(
+		step{name: "GetNumPlayingTracks", id: ext(0x35), expect: wantReply(ext(0x36))},
 		stepTrackQuery("GetIndexedPlayingTrackAlbumName", 0x24, s.track),
 		stepTrackQuery("GetIndexedPlayingTrackTitle", 0x20, s.track),
 		stepTrackQuery("GetIndexedPlayingTrackArtistName", 0x22, s.track),

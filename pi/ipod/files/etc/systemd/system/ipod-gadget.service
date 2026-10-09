@@ -1,0 +1,13 @@
+[Unit]
+Description=iPod USB gadget (configfs) for the car stereo
+Conflicts=sniffer-proxy.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=-/usr/local/sbin/ipod-gadget down
+ExecStart=/usr/local/sbin/ipod-gadget up
+ExecStop=/usr/local/sbin/ipod-gadget down
+
+[Install]
+WantedBy=multi-user.target

@@ -17,7 +17,7 @@ ssh root@pi3-sink.local stereo playpause
 ssh root@pi3-sink.local stereo next
 ```
 
-`stereo` sends what the car stereo sends for the button, waits 1.5 s, and prints the result, for example `playing | track 4/12 | Title - Artist | 0:42/3:15`. `playpause` sends end-fast-forward/rewind and then toggle. `next` sends `SetCurrentPlayingTrack(index + 1)` and end-fast-forward/rewind. It sends `PlayControl` Next instead when the device reports an index beyond its track count (the iPhone does). More commands: `iap-sink ctl help`.
+`stereo` sends what the car stereo sends for the button, waits up to 6 s for the player to change, and prints the result, for example `playing | track 4/12 | Title - Artist | 0:42/3:15`. `playpause` sends end-fast-forward/rewind and then toggle. `next` sends `SetCurrentPlayingTrack(index + 1)` and end-fast-forward/rewind. It sends `PlayControl` Next instead when the device reports an index beyond its track count (the iPhone does). More commands: `iap-sink ctl help`.
 
 ## 1. What is reused from `oandrew/ipod`
 
@@ -112,6 +112,7 @@ Never use a USB-C to USB-C cable between the two Pis. Keep VBUS taped, as in the
 | iAP1: identify, certificate, sample rates, init script, polling, track metadata, play | Pass. The iPhone accepted the certificate (`AckDevAuthenticationInfo` status 0) |
 | USB audio to the 3.5 mm jack | Pass: the ALSA card `iPhone` appears, `alsaloop` plays, audio is clean by ear |
 | Control test (session `sink-05`): pause, play, next, prev, toggle ×2, next, prev | **Pass.** All 15 `PlayControl` packets were acked `success` by the iPhone 2 to 3 ms after the sink sent them. Pause and play changed the state at once. Next gave a new song. Previous restarted the song after 3 s, as an iPod does. All 16,877 transfers in the capture are explained. Audio: 64,772 packets, 0 error packets, 1 isochronous timing event at the start. The relay forwarded `SET_CONFIGURATION 2` only (twice per connection, as in `car-10`), and acked configuration 0 without forwarding it. |
+| Pi 5 as a Bluetooth iPod (no iPhone on USB) | Pass. The sink is the stereo for `pi/ipod/`: same session, track data from a Bluetooth phone, audio on the jack, `stereo playpause` and `stereo next`. See `pi/ipod/README.md`. |
 | iAP1 after 2.5 minutes | **The iPhone stops answering.** It sent two signature challenges 75 s apart, got no signature, then sent `AckDevAuthenticationStatus` with status `0x07` (failed) and **no packet after that**. Audio keeps playing. The car stereo answered the first challenge after 56 s. So one connection gives about 2.5 minutes of iAP control without the key. |
 
 Bugs found and fixed on the way: the sink crashed in upstream `parsePacket` on a frame with a lost first fragment (now a bounds-checked splitter and a frame reader that drops orphan fragments and logs them), and the relay did not ack configuration 0 (patch 09).

@@ -9,3 +9,4 @@ __pycache__/
 
 # Pi 3 sink build output
 sink/out/
+pi/ipod/out/

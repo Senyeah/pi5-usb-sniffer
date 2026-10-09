@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Switch the Pi 5 between the USB relay and the Bluetooth iPod. Usage: ipod-mode bt|relay|status
+# Both use the USB-C port, so only one can run.
+set -euo pipefail
+
+BT_UNITS=(ipod-gadget.service ipod-bridge.service ipod-audio.service)
+
+case "${1:-status}" in
+  bt)
+    command -v capture > /dev/null && capture stop > /dev/null 2>&1 || true
+    # The packaged player would play to the default sound card.
+    systemctl disable --now bluealsa-aplay.service > /dev/null 2>&1 || true
+    systemctl daemon-reload
+    systemctl restart bluealsa.service
+    systemctl enable --now "${BT_UNITS[@]}"
+    echo "Bluetooth iPod on, at every boot. Pair the phone: ipod-bridge ctl pair"
+    ;;
+  relay)
+    systemctl disable --now ipod-audio.service ipod-bridge.service ipod-gadget.service
+    echo "Bluetooth iPod off. Start the relay with: capture start <label>"
+    ;;
+  status)
+    for u in "${BT_UNITS[@]}" bluetooth.service bluealsa.service; do
+      printf '%-24s %s\n' "$u" "$(systemctl is-active "$u" || true)"
+    done
+    ipod-gadget status
+    ;;
+  *)
+    echo "Usage: ipod-mode bt|relay|status" >&2
+    exit 2
+    ;;
+esac

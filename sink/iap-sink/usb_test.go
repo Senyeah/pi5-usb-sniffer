@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func write(t *testing.T, path, s string) {
@@ -59,5 +60,21 @@ func TestSelectConfigAndHIDRaw(t *testing.T) {
 	}
 	if _, err := findHIDRaw(d, 1, "/dev"); err == nil {
 		t.Error("configuration 1 has no HID interface, but a node was found")
+	}
+}
+
+func TestWaitBound(t *testing.T) {
+	root := fakeSysfs(t)
+	d := findDevice(root, "05ac")
+	if waitBound(d, 2, 150*time.Millisecond) {
+		t.Fatal("no interface has a driver, but waitBound said yes")
+	}
+	for _, i := range []string{"0", "2"} {
+		if err := os.Symlink("/sys/bus/usb/drivers/x", d.Path+"/1-1.2:2."+i+"/driver"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !waitBound(d, 2, time.Second) {
+		t.Error("all interfaces have a driver, but waitBound said no")
 	}
 }

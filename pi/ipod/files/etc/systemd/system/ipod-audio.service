@@ -1,0 +1,13 @@
+[Unit]
+Description=Play the phone's Bluetooth audio into the iPod USB gadget
+After=ipod-gadget.service bluealsa.service
+Requires=ipod-gadget.service bluealsa.service
+BindsTo=ipod-gadget.service
+
+[Service]
+ExecStart=/usr/bin/bluealsa-aplay -S --profile-a2dp --volume=none --pcm=plughw:CARD=UAC1Gadget,DEV=0 --pcm-buffer-time=500000 --pcm-period-time=50000
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

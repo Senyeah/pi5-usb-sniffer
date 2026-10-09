@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -104,4 +105,25 @@ func readReportDescriptor(f *os.File) ([]byte, error) {
 		return nil, fmt.Errorf("HIDIOCGRDESC: %w", err)
 	}
 	return append([]byte(nil), d.Value[:n]...), nil
+}
+
+// waitBound waits until every interface of the configuration has a driver, or the time is over.
+func waitBound(d *usbDev, cfg int, within time.Duration) bool {
+	deadline := time.Now().Add(within)
+	for {
+		ifs, _ := filepath.Glob(fmt.Sprintf("%s/%s:%d.*", d.Path, d.Name, cfg))
+		bound := len(ifs) > 0
+		for _, i := range ifs {
+			if _, err := os.Readlink(i + "/driver"); err != nil {
+				bound = false
+			}
+		}
+		if bound {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }

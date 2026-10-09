@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# Create or remove the iPod USB gadget (configfs) on the Pi 5. Usage: ipod-gadget up|down|status
+# It copies the iPad of session car-10: two configurations, and the stereo selects configuration 2
+# ("iPod USB Interface": USB audio out of the device, and the iAP HID interface).
+set -euo pipefail
+
+G=/sys/kernel/config/usb_gadget/ipod
+UDC=${UDC:-$(ls /sys/class/udc 2>/dev/null | head -n 1)}
+VID=${IPOD_VID:-0x05ac}
+PID=${IPOD_PID:-0x12ab}
+BCD=${IPOD_BCD:-0x1402}
+SERIAL=${IPOD_SERIAL:-0000A0B0C0D0E0F1}
+RATE=${IPOD_RATE:-44100}
+# USB requests queued for the audio endpoint (1 ms each). The kernel default is 2: too little for the dwc2 controller.
+REQ=${IPOD_REQ:-16}
+
+# HID report descriptor of an iPod at full speed (ipod-gadget, gadget/ipod.h): input IDs 1-4, output IDs 5-9.
+HID_DESC=0600ff0901a1017508268000150009018501950c82020109018502950e820201\
+09018503951482020109018504953f8202010901850595089202010901850695\
+0a92020109018507950e92020109018508951492020109018509953f920201c0
+
+up() {
+  [ -n "$UDC" ] || { echo "No UDC found. Is dtoverlay=dwc2,dr_mode=peripheral set?" >&2; exit 1; }
+  [ ! -d "$G" ] || { echo "The gadget exists already. Run: ipod-gadget down" >&2; exit 1; }
+  modprobe libcomposite
+  modprobe usb_f_uac1
+  modprobe usb_f_hid
+  mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config
+
+  mkdir -p "$G"
+  cd "$G"
+  echo "$VID" > idVendor
+  echo "$PID" > idProduct
+  echo "$BCD" > bcdDevice
+  echo 0x0210 > bcdUSB
+  echo 0 > bDeviceClass
+  echo 0 > bDeviceSubClass
+  echo 0 > bDeviceProtocol
+  mkdir -p strings/0x409
+  echo "Apple Inc." > strings/0x409/manufacturer
+  echo "iPad" > strings/0x409/product
+  echo "$SERIAL" > strings/0x409/serialnumber
+
+  # Configuration 1: a placeholder, as the iPad has (PTP). Configuration 2: audio and HID.
+  mkdir -p functions/mass_storage.0
+  echo 1 > functions/mass_storage.0/lun.0/removable
+  echo 1 > functions/mass_storage.0/lun.0/ro
+
+  mkdir -p functions/uac1.0
+  echo 3 > functions/uac1.0/p_chmask   # device to host: stereo
+  echo 0 > functions/uac1.0/c_chmask
+  echo 2 > functions/uac1.0/p_ssize
+  echo "$RATE" > functions/uac1.0/p_srate
+  echo 0 > functions/uac1.0/p_mute_present
+  echo 0 > functions/uac1.0/p_volume_present
+  # The capture side defaults to mute and volume present, which adds an interrupt endpoint. The iPhone has none.
+  echo 0 > functions/uac1.0/c_mute_present
+  echo 0 > functions/uac1.0/c_volume_present
+  echo "$REQ" > functions/uac1.0/req_number
+
+  mkdir -p functions/hid.0
+  echo 0 > functions/hid.0/protocol
+  echo 0 > functions/hid.0/subclass
+  echo 64 > functions/hid.0/report_length
+  echo 1 > functions/hid.0/no_out_endpoint
+  printf '%s' "$HID_DESC" | sed 's/../\\x&/g' | xargs -0 printf > functions/hid.0/report_desc
+
+  mkdir -p configs/c.1/strings/0x409 configs/c.2/strings/0x409
+  echo "Still Image" > configs/c.1/strings/0x409/configuration
+  echo "iPod USB Interface" > configs/c.2/strings/0x409/configuration
+  echo 500 > configs/c.1/MaxPower
+  echo 500 > configs/c.2/MaxPower
+  echo 0xc0 > configs/c.1/bmAttributes
+  echo 0xc0 > configs/c.2/bmAttributes
+  ln -s functions/mass_storage.0 configs/c.1/
+  ln -s functions/uac1.0 configs/c.2/
+  ln -s functions/hid.0 configs/c.2/
+
+  echo "$UDC" > UDC
+  echo "iPod gadget up on $UDC: $VID:$PID, hidg $(cat functions/hid.0/dev)"
+}
+
+down() {
+  [ -d "$G" ] || { echo "No gadget."; return 0; }
+  cd "$G"
+  echo "" > UDC 2>/dev/null || true
+  rm -f configs/c.2/uac1.0 configs/c.2/hid.0 configs/c.1/mass_storage.0 2>/dev/null || true
+  rmdir configs/c.2/strings/0x409 configs/c.1/strings/0x409 configs/c.2 configs/c.1 2>/dev/null || true
+  rmdir functions/uac1.0 functions/hid.0 functions/mass_storage.0 2>/dev/null || true
+  rmdir strings/0x409 2>/dev/null || true
+  cd /
+  rmdir "$G"
+  echo "iPod gadget removed."
+}
+
+status() {
+  if [ -d "$G" ]; then
+    echo "gadget: present, UDC=$(cat "$G/UDC"), state=$(cat /sys/class/udc/"$UDC"/state 2>/dev/null), speed=$(cat /sys/class/udc/"$UDC"/current_speed 2>/dev/null)"
+    ls /dev/hidg* 2>/dev/null | sed 's/^/hid: /'
+    grep -H . /proc/asound/card*/id 2>/dev/null | grep -i ipod | sed 's/^/alsa: /' || true
+  else
+    echo "gadget: none"
+  fi
+}
+
+case "${1:-}" in
+  up) up ;;
+  down) down ;;
+  status) status ;;
+  *) echo "Usage: ipod-gadget up|down|status" >&2; exit 2 ;;
+esac

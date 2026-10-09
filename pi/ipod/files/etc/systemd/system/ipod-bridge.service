@@ -1,0 +1,15 @@
+[Unit]
+Description=iPod for the car stereo: iAP1 over the USB gadget, data and controls from the phone (AVRCP)
+After=ipod-gadget.service bluetooth.service
+Requires=ipod-gadget.service bluetooth.service
+BindsTo=ipod-gadget.service
+
+[Service]
+EnvironmentFile=-/etc/ipod-bridge.conf
+ExecStart=/usr/local/bin/ipod-bridge run
+Restart=always
+RestartSec=2
+StateDirectory=ipod-bridge
+
+[Install]
+WantedBy=multi-user.target

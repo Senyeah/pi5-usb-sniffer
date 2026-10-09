@@ -1,0 +1,88 @@
+--- a/f_uac1.c	2026-10-09 13:31:07
++++ b/f_uac1.c	2026-10-09 13:31:07
+@@ -257,7 +257,34 @@
+ 	.bLockDelayUnits =	0,
+ 	.wLockDelay =		0,
+ };
++
+ 
++/*
++ * Full speed isochronous endpoints carry one packet per frame: bInterval must be 1.
++ * The shared descriptors below have bInterval 4, which is right for high speed only. At full speed
++ * u_audio then plans 125 packets per second of 352 frames. These copies are for full speed.
++ * Like the iPhone: no synchronisation type.
++ */
++static struct usb_endpoint_descriptor fs_as_out_ep_desc  = {
++	.bLength =		USB_DT_ENDPOINT_AUDIO_SIZE,
++	.bDescriptorType =	USB_DT_ENDPOINT,
++	.bEndpointAddress =	USB_DIR_OUT,
++	.bmAttributes =		USB_ENDPOINT_SYNC_ADAPTIVE
++				| USB_ENDPOINT_XFER_ISOC,
++	.wMaxPacketSize	=	cpu_to_le16(UAC1_OUT_EP_MAX_PACKET_SIZE),
++	.bInterval =		1,
++};
++
++static struct usb_endpoint_descriptor fs_as_in_ep_desc  = {
++	.bLength =		USB_DT_ENDPOINT_AUDIO_SIZE,
++	.bDescriptorType =	USB_DT_ENDPOINT,
++	.bEndpointAddress =	USB_DIR_IN,
++	.bmAttributes =		USB_ENDPOINT_SYNC_NONE
++				| USB_ENDPOINT_XFER_ISOC,
++	.wMaxPacketSize	=	cpu_to_le16(UAC1_OUT_EP_MAX_PACKET_SIZE),
++	.bInterval =		1,
++};
++
+ static struct usb_descriptor_header *f_audio_desc[] = {
+ 	(struct usb_descriptor_header *)&ac_interface_desc,
+ 	(struct usb_descriptor_header *)&ac_header_desc,
+@@ -292,6 +319,9 @@
+ 	NULL,
+ };
+ 
++/* The full speed list. setup_descriptor() fills it from f_audio_desc. */
++static struct usb_descriptor_header *f_audio_fs_desc[ARRAY_SIZE(f_audio_desc)];
++
+ /* Standard ISO OUT Endpoint Descriptor */
+ static struct usb_endpoint_descriptor ss_as_out_ep_desc  = {
+ 	.bLength =		USB_DT_ENDPOINT_AUDIO_SIZE,
+@@ -1174,6 +1204,15 @@
+ 		f_audio_desc[i++] = USBDHDR(&as_iso_in_desc);
+ 	}
+ 	f_audio_desc[i] = NULL;
++
++	for (i = 0; f_audio_desc[i]; i++) {
++		f_audio_fs_desc[i] = f_audio_desc[i];
++		if (f_audio_desc[i] == USBDHDR(&as_out_ep_desc))
++			f_audio_fs_desc[i] = USBDHDR(&fs_as_out_ep_desc);
++		else if (f_audio_desc[i] == USBDHDR(&as_in_ep_desc))
++			f_audio_fs_desc[i] = USBDHDR(&fs_as_in_ep_desc);
++	}
++	f_audio_fs_desc[i] = NULL;
+ }
+ 
+ static int f_audio_validate_opts(struct g_audio *audio, struct device *dev)
+@@ -1424,6 +1463,7 @@
+ 		if (!ep)
+ 			goto err_free_fu;
+ 		ss_as_out_ep_desc.bEndpointAddress = as_out_ep_desc.bEndpointAddress;
++		fs_as_out_ep_desc.bEndpointAddress = as_out_ep_desc.bEndpointAddress;
+ 		audio->out_ep = ep;
+ 		audio->out_ep->desc = &as_out_ep_desc;
+ 	}
+@@ -1433,6 +1473,7 @@
+ 		if (!ep)
+ 			goto err_free_fu;
+ 		ss_as_in_ep_desc.bEndpointAddress = as_in_ep_desc.bEndpointAddress;
++		fs_as_in_ep_desc.bEndpointAddress = as_in_ep_desc.bEndpointAddress;
+ 		audio->in_ep = ep;
+ 		audio->in_ep->desc = &as_in_ep_desc;
+ 	}
+@@ -1440,7 +1481,7 @@
+ 	setup_descriptor(audio_opts);
+ 
+ 	/* copy descriptors, and track endpoint copies */
+-	status = usb_assign_descriptors(f, f_audio_desc, f_audio_desc, f_audio_ss_desc,
++	status = usb_assign_descriptors(f, f_audio_fs_desc, f_audio_desc, f_audio_ss_desc,
+ 					f_audio_ss_desc);
+ 	if (status)
+ 		goto err_free_fu;

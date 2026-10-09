@@ -87,6 +87,7 @@ pi5-usb-sniffer/
 │       ├── apple-vendor-rules.json  # usb-proxy injection rules: ignore and stall
 │       └── config.json              # usb-proxy options file
 ├── sink/                     # Pi 3 B test sink: plays the car stereo for the relay, see sink/README.md
+│   (pi/ipod/               # Bluetooth iPod: the Pi 5 as an iPod for the stereo, see pi/ipod/README.md)
 ├── decode/                   # Python decoder, a uv project
 │   ├── pyproject.toml
 │   ├── uv.lock
@@ -228,6 +229,10 @@ To check that the Pi matches this repo, use an rsync dry run:
 ```bash
 rsync -ani --exclude .DS_Store pi/ root@pi5-sniffer.local:/opt/sniffer/pi/
 ```
+
+### 5.6 Bluetooth iPod mode
+
+The Pi 5 can also be an iPod that plays the phone's Bluetooth audio, instead of relaying a USB iPhone. It sends the track data over iAP1 and turns the stereo's play, pause and next into AVRCP commands for the phone. It uses the same USB-C port as the relay, so `ipod-mode bt` and `ipod-mode relay` switch between them. See [pi/ipod/README.md](pi/ipod/README.md). The Pi 3 sink is its test stereo.
 
 ## 6. Running sessions
 
@@ -445,7 +450,8 @@ rsync -a root@pi5-sniffer.local:/root/sessions/20261008-223159-car-15-4cores ses
 3. **Golden captures:** run the Phase 5 action list in the car (PLAN.md, Phase 5 step 6), with a `capture mark` before each action. Then add golden-file tests: a short trimmed capture and its expected timeline.
 4. **iPhone in the car:** re-test the iPhone through the final relay. Only the iPad has worked there so far.
 5. **Investigate** the connection where the stereo never sent its certificate, and the 56 s signature delay. Is the delay normal for this stereo with a direct connection? A direct capture needs a passive analyser; see PLAN.md section 10.
-6. **Optional:** usbmux pairing through the relay (not needed for the stereo). An ADuM4160 USB isolator could replace the full-speed translation: it would make the device enumerate at full speed on the Pi.
+6. **Bluetooth iPod in the car.** It passed on the bench with the Pi 3 as the stereo (`pi/ipod/README.md`, section 8). It has not run with the real stereo.
+7. **Optional:** usbmux pairing through the relay (not needed for the stereo). An ADuM4160 USB isolator could replace the full-speed translation: it would make the device enumerate at full speed on the Pi.
 
 ## 12. Working with this user
 
