@@ -1,6 +1,6 @@
 # USB relay and sniffer (`tools/relay`)
 
-The Pi 5 first ran as a USB relay and sniffer. It sat between an Apple device and the car stereo, forwarded all USB traffic in both directions and recorded it. The recordings, mainly session `car-10`, showed what the stereo sends and what an iPad answers. The Bluetooth bridge in the repository root copies that iPad. See [../../README.md](../../README.md) for the bridge and [../../PLAN.md](../../PLAN.md) for the history (phases 0–6) and the relay risks (R1–R17).
+The Pi 5 first ran as a USB relay and sniffer. It sat between an Apple device and the car stereo, forwarded all USB traffic in both directions and recorded it. The recordings, mainly session `car-10`, showed what the stereo sends and what an iPad answers. The Bluetooth bridge in the repository root copies that iPad. See [../../CLAUDE.md](../../CLAUDE.md) for the bridge and [../../PLAN.md](../../PLAN.md) for the history (phases 0–6) and the relay risks (R1–R17).
 
 The relay is still installed on the Pi 5. `ipod-mode relay` switches the USB-C port back to it, and `ipod-mode bt` returns to the bridge. This folder was `pi/` before 09/10/2026. The paths **on the Pi** did not change: the files are in `/opt/sniffer/pi/`, the command is `capture`, and the host name is still `pi5-sniffer`.
 
@@ -100,7 +100,7 @@ Upstream `usb-proxy` could not relay this device to this stereo. Each patch fixe
 | `04-full-speed-host` (R11) | The stereo is full speed only, but the device is high speed. At start the relay fetches the other-speed descriptors (`GET_DESCRIPTOR` type 7). If `/sys/class/udc/*/current_speed` is `full-speed`, it serves those in place of the configuration descriptors. It also enables the gadget endpoints with the full-speed packet size and interval. |
 | `05-learned-stalls` (R12) | The gadget framework acks an OUT control request with data before the relay can read it, so a device STALL cannot reach the host. The patch remembers each setup packet that the device stalled. It stalls the host at SETUP the next time that request comes. |
 | `06-ack-before-device-work` (R13) | A standard request with no data must complete within 50 ms. `SET_CONFIGURATION` on the real device takes about 54 ms. The patch enables the gadget endpoints and acks first, then configures the device and starts the endpoint threads. `SET_INTERFACE` uses the same order. |
-| `07-apple-hid-fs-tables` (R14) | The Apple device has a different HID report table at each speed. At full speed the relay serves the 96-byte full-speed HID report descriptor. It re-packetises iAP traffic between the two tables in both directions (root README, section 9.2). It also drops zero-length interrupt reads. It works only when the device's HID report descriptor is 208 bytes at high speed and 96 at full speed. |
+| `07-apple-hid-fs-tables` (R14) | The Apple device has a different HID report table at each speed. At full speed the relay serves the 96-byte full-speed HID report descriptor. It re-packetises iAP traffic between the two tables in both directions (../../CLAUDE.md, section 9.2). It also drops zero-length interrupt reads. It works only when the device's HID report descriptor is 208 bytes at high speed and 96 at full speed. |
 | `08-fs-in-max-report` (R15 test) | Adds option `apple_fs_in_max_count` in `config.json` (default 63). A test with 20 did not change anything, and the option was removed from `config.json`. The patch is still applied, with no effect. |
 | `09-ack-config-zero` (R17) | A Linux host sends `SET_CONFIGURATION 0`. Upstream skipped it without an ACK, and the host timed out after 5 s. The patch acks configuration 0 and stalls other invalid values. The car stereo never sends it. |
 
@@ -280,7 +280,7 @@ Build notes:
 rsync -a root@pi5-sniffer.local:/root/sessions/20261008-223159-car-15-4cores sessions/
 ```
 
-2. **Check the Pi's health** after the hard power cut (root README, section 10).
+2. **Check the Pi's health** after the hard power cut (../../CLAUDE.md, section 10).
 3. **Golden captures:** run the Phase 5 action list in the car (../../PLAN.md, Phase 5 step 6), with a `capture mark` before each action. Then add golden-file tests: a short trimmed capture and its expected timeline.
 4. **iPhone in the car:** re-test the iPhone through the final relay. Only the iPad has worked there so far.
 5. **Investigate** the connection where the stereo never sent its certificate, and the 56 s signature delay. Is the delay normal for this stereo with a direct connection? A direct capture needs a passive analyser; see ../../PLAN.md section 10.

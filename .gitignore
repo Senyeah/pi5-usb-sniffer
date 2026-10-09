@@ -1,4 +1,4 @@
-# Captures, decoder output and latency captures hold private data (README.md, "Data and privacy").
+# Captures, decoder output and latency captures hold private data (CLAUDE.md, "Data and privacy").
 sessions/
 
 .DS_Store

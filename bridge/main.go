@@ -88,7 +88,7 @@ func loadConfig() config {
 	}
 }
 
-// pipelineExtra is the Pi's delay beyond alsaloop's target, measured on the bench (README.md, "Delay reporting").
+// pipelineExtra is the Pi's delay beyond alsaloop's target, measured on the bench (CLAUDE.md, "Delay reporting").
 const pipelineExtra = 0 * time.Millisecond
 
 // reportDelay is what the Pi adds between the phone and the stereo: alsaloop's target (the same setting as

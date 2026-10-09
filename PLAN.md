@@ -1,6 +1,6 @@
 # pi-iap-bt-bridge: plan
 
-Status (09/10/2026): the Pi 5 plays a phone's Bluetooth audio to the car stereo as an iPod, with track data and controls (Phases 8–11). Delay reporting is in progress (Phase 12). The project started on 08/10/2026 as a USB relay and sniffer (Phases 0–6); section 6 keeps that history. See [README.md](README.md) for how everything works.
+Status (09/10/2026): the Pi 5 plays a phone's Bluetooth audio to the car stereo as an iPod, with track data and controls (Phases 8–11). Delay reporting is in progress (Phase 12). The project started on 08/10/2026 as a USB relay and sniffer (Phases 0–6); section 6 keeps that history. See [CLAUDE.md](CLAUDE.md) for how everything works, and [README.md](README.md) for the short overview.
 
 ## 1. Goal
 
@@ -337,7 +337,7 @@ The iPad paired, and play, pause (the stereo's mute), DISP, RDM and RPT worked. 
 
 | Problem | Cause (traces of sessions `013439`, `013909`, `014206`) | Fix |
 |---|---|---|
-| `Unsupported` when USB is selected and no phone is connected | The stereo asked for the title and album of the track and got empty text, with "stopped" and length 0. | The "Waiting" track (README.md, section 6.2). |
+| `Unsupported` when USB is selected and no phone is connected | The stereo asked for the title and album of the track and got empty text, with "stopped" and length 0. | The "Waiting" track (CLAUDE.md, section 6.2). |
 | Next sometimes goes back | The stereo's next is `SetCurrentPlayingTrack(index + 1)`, wrapped to 0 at its last read track count. It reads the count before the index changes, so with count = index + 2 the next press after a skip went to 0. The bridge sent `Previous`, and the iPad restarted the track. | 1000 virtual tracks, the index starts at 500, steps go the short way round. |
 | Back sometimes goes forward; quick presses lost | At a low index the stereo wraps back to the end of the list, which looked like "next". Two quick presses come as one index two tracks away, which was one skip. The back button sends toggle, `PlayControl` 0x04, then `SetCurrentPlayingTrack` with the old index, which could skip forward again. | The same list; several steps; the back button's second command is ignored. |
 | Clipping on loud parts | The decoded Bluetooth stream does not clip: 25 s of a loud song from the iPad had its peak at -4.2 dBFS, RMS -14.4 dBFS, no sample at full scale. The iPad's volume (38 of 127) does not change it. The iPad's USB audio in car-10 had RMS -19.5 to -26.3 dBFS (other songs). The stereo itself clips. | 6 dB less (`IPOD_AUDIO_GAIN_DB`). The ALSA `route` plugin was checked on the Pi: exactly -6.00 dB. |
@@ -369,8 +369,9 @@ On 09/10/2026 the repository `pi5-usb-sniffer` became `pi-iap-bt-bridge`, and th
 | Before | After |
 |---|---|
 | `pi/ipod/` (the bridge) | repository root (`bridge/`, `files/`, `uac1-fs/`, `latency/`, the scripts) |
-| `pi/ipod/README.md` | `README.md` (the car-run results moved to this section) |
-| `README.md` (the relay handover notes) | `tools/relay/README.md` and `tools/decode/README.md`; the protocol facts went to `README.md` |
+| `pi/ipod/README.md` | `CLAUDE.md` (the car-run results moved to this section) |
+| `README.md` (the relay handover notes) | `tools/relay/README.md` and `tools/decode/README.md`; the protocol facts went to `CLAUDE.md` |
+| `README.md` (the full bridge notes, 09/10/2026) | `CLAUDE.md`; `README.md` is now a short overview for people |
 | `pi/` (the relay) | `tools/relay/` |
 | `decode/` | `tools/decode/` |
 | `sink/` | `tools/test-stereo/` |
@@ -480,4 +481,4 @@ For a pure capture-and-decode goal, a Cynthion has less risk than the Pi relay. 
 
 - Owners report that the PA68L0 has no AUX input. Its USB port supports few devices.
 - Aftermarket products that make a phone look like an iPod to this stereo exist, for example the ViseeO tune2air. This agrees with the iAP1 expectation.
-- What the stereo sends and expects, from the relay and the bridge: README.md, section 9.
+- What the stereo sends and expects, from the relay and the bridge: CLAUDE.md, section 9.
