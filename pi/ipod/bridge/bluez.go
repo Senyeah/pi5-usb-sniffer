@@ -20,9 +20,13 @@ const (
 	ifAdapter    = "org.bluez.Adapter1"
 	ifProps      = "org.freedesktop.DBus.Properties"
 	ifObjMgr     = "org.freedesktop.DBus.ObjectManager"
+	ifTransport  = "org.bluez.MediaTransport1"
+	bluealsaName = "org.bluealsa"
+	ifBluealsa   = "org.bluealsa.PCM1"
 	agentPath    = dbus.ObjectPath("/ipod/agent")
 	agentCap     = "NoInputNoOutput" // "Just Works" pairing: the Pi has no screen or keys
 	pairingSecs  = 600
+	staleTries   = 3 // connects in a row that fail with "key missing": the phone has deleted its key
 	adapterPath  = dbus.ObjectPath("/org/bluez/hci0")
 	signalBuffer = 128
 
@@ -42,6 +46,14 @@ type playerData struct {
 	updated time.Time
 }
 
+type transportData struct {
+	device   dbus.ObjectPath
+	state    string // idle, pending, active
+	hasDelay bool   // delay reporting is on for this stream
+	delay    uint16 // reported delay, 1/10 ms
+	sent     uint16 // the last delay this program reported, 1/10 ms
+}
+
 type deviceData struct {
 	alias     string
 	connected bool
@@ -56,10 +68,13 @@ type bluezPhone struct {
 	mu      sync.Mutex
 	players map[dbus.ObjectPath]*playerData
 	devices map[dbus.ObjectPath]*deviceData
-	changed chan struct{}
-	ready   chan struct{} // closed when the first scan of BlueZ is done
-	once    sync.Once
-	pairing time.Time // the pairing window ends at this time
+	// A2DP transports, for delay reporting.
+	transports map[dbus.ObjectPath]*transportData
+	delayKick  chan struct{}
+	changed    chan struct{}
+	ready      chan struct{} // closed when the first scan of BlueZ is done
+	once       sync.Once
+	pairing    time.Time // the pairing window ends at this time
 }
 
 func newBluezPhone(log *slog.Logger) (*bluezPhone, error) {
@@ -69,10 +84,12 @@ func newBluezPhone(log *slog.Logger) (*bluezPhone, error) {
 	}
 	return &bluezPhone{
 		conn: conn, log: log,
-		players: map[dbus.ObjectPath]*playerData{},
-		devices: map[dbus.ObjectPath]*deviceData{},
-		changed: make(chan struct{}, 1),
-		ready:   make(chan struct{}),
+		players:    map[dbus.ObjectPath]*playerData{},
+		devices:    map[dbus.ObjectPath]*deviceData{},
+		transports: map[dbus.ObjectPath]*transportData{},
+		delayKick:  make(chan struct{}, 1),
+		changed:    make(chan struct{}, 1),
+		ready:      make(chan struct{}),
 	}, nil
 }
 
@@ -167,6 +184,33 @@ func (b *bluezPhone) applyDevice(path dbus.ObjectPath, props map[string]dbus.Var
 	}
 }
 
+func (b *bluezPhone) applyTransport(path dbus.ObjectPath, props map[string]dbus.Variant) {
+	t := b.transports[path]
+	if t == nil {
+		t = &transportData{}
+		b.transports[path] = t
+	}
+	for k, v := range props {
+		switch k {
+		case "Device":
+			if d, ok := v.Value().(dbus.ObjectPath); ok {
+				t.device = d
+			}
+		case "State":
+			t.state = str(v)
+		case "Delay":
+			t.hasDelay = true
+			if d, ok := v.Value().(uint16); ok {
+				t.delay = d
+			}
+		}
+	}
+	select {
+	case b.delayKick <- struct{}{}:
+	default:
+	}
+}
+
 // Run reads the current objects, then follows the signals until the connection closes.
 func (b *bluezPhone) Run() error {
 	if err := b.conn.AddMatchSignal(dbus.WithMatchSender(bluezName)); err != nil {
@@ -212,6 +256,8 @@ func (b *bluezPhone) Run() error {
 						delete(b.players, path)
 					case ifDevice:
 						delete(b.devices, path)
+					case ifTransport:
+						delete(b.transports, path)
 					}
 				}
 			}
@@ -226,6 +272,9 @@ func (b *bluezPhone) Run() error {
 func (b *bluezPhone) applyInterfaces(path dbus.ObjectPath, ifaces map[string]map[string]dbus.Variant) {
 	if props, ok := ifaces[ifPlayer]; ok {
 		b.applyPlayer(path, props)
+	}
+	if props, ok := ifaces[ifTransport]; ok {
+		b.applyTransport(path, props)
 	}
 	if props, ok := ifaces[ifDevice]; ok {
 		b.applyDevice(path, props)
@@ -282,7 +331,7 @@ func (b *bluezPhone) State() phoneState {
 		name = d.alias
 	}
 	return phoneState{
-		Connected: true, Name: name, Status: p.status, PosMS: p.posMS, At: p.at, Track: p.track,
+		Connected: true, Player: true, Name: name, Status: p.status, PosMS: p.posMS, At: p.at, Track: p.track,
 		Shuffle: p.shuffle, Repeat: p.repeat,
 	}
 }
@@ -358,6 +407,19 @@ func (b *bluezPhone) OpenPairing(secs uint32) error {
 	return nil
 }
 
+// OpenPairingIfUnpaired opens the pairing window when no phone is paired. It tells whether it opened.
+func (b *bluezPhone) OpenPairingIfUnpaired() bool {
+	if b.HasPairedDevice() {
+		return false
+	}
+	if err := b.OpenPairing(pairingSecs); err != nil {
+		b.log.Warn("cannot open the pairing window", "err", err)
+		return false
+	}
+	b.log.Info("no phone is paired: pairing window open", "seconds", pairingSecs)
+	return true
+}
+
 func (b *bluezPhone) pairingOpen() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -374,6 +436,50 @@ func (b *bluezPhone) HasPairedDevice() bool {
 		}
 	}
 	return false
+}
+
+// AnyConnected tells whether a phone is connected.
+func (b *bluezPhone) AnyConnected() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, d := range b.devices {
+		if d.connected {
+			return true
+		}
+	}
+	return false
+}
+
+// matchDevices lists the known phones that match spec: "all", a Bluetooth address or a name.
+func (b *bluezPhone) matchDevices(spec string) []dbus.ObjectPath {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	addr := "dev_" + strings.ToUpper(strings.NewReplacer(":", "_", "-", "_").Replace(spec))
+	var out []dbus.ObjectPath
+	for path, d := range b.devices {
+		if spec == "all" && (d.paired || d.trusted) || strings.HasSuffix(string(path), addr) || d.alias == spec {
+			out = append(out, path)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
+// Forget removes the pairing of a phone from the Pi. The phone has to pair again.
+func (b *bluezPhone) Forget(path dbus.ObjectPath) error {
+	if err := b.conn.Object(bluezName, adapterPath).Call(ifAdapter+".RemoveDevice", 0, path).Err; err != nil {
+		return err
+	}
+	b.mu.Lock()
+	delete(b.devices, path) // BlueZ confirms with a signal a moment later
+	b.mu.Unlock()
+	b.notify()
+	return nil
+}
+
+// keyLost tells whether a connect error means that the phone has deleted its pairing key.
+func keyLost(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "br-connection-key-missing")
 }
 
 func (b *bluezPhone) Devices() []string {
@@ -478,6 +584,7 @@ func (b *bluezPhone) reconnectTargets() []dbus.ObjectPath {
 func (b *bluezPhone) Reconnect(ctx context.Context, every time.Duration) {
 	start := time.Now()
 	failing := map[dbus.ObjectPath]bool{}
+	keyMissing := map[dbus.ObjectPath]int{}
 	for ctx.Err() == nil {
 		wait := every
 		if time.Since(start) > time.Minute {
@@ -500,12 +607,86 @@ func (b *bluezPhone) Reconnect(ctx context.Context, every time.Duration) {
 			if err == nil {
 				b.log.Info("connected to the phone", "device", path)
 				delete(failing, path)
+				delete(keyMissing, path)
+				continue
+			}
+			if !keyLost(err) {
+				delete(keyMissing, path)
+			} else if keyMissing[path]++; keyMissing[path] >= staleTries {
+				// The phone forgot the Pi, for example after "Forget This Device". Without this the Pi stays hidden.
+				b.log.Warn("the phone has lost its pairing key: removing it so that it can pair again", "device", path)
+				if ferr := b.Forget(path); ferr != nil {
+					b.log.Warn("cannot remove the phone", "device", path, "err", ferr)
+				} else {
+					delete(failing, path)
+					delete(keyMissing, path)
+					b.OpenPairingIfUnpaired()
+				}
 				continue
 			}
 			if !failing[path] { // one line for a phone that is away, not one per try
 				b.log.Info("cannot connect to the phone yet, trying again", "device", path, "err", err)
 				failing[path] = true
 			}
+		}
+	}
+}
+
+// delayTargets lists the transports whose phone does not know the delay yet. BlueZ lets this program set the
+// delay only while BlueALSA does not hold the transport, that is while it is idle.
+func (b *bluezPhone) delayTargets(tenths uint16) []dbus.ObjectPath {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var out []dbus.ObjectPath
+	for path, t := range b.transports {
+		if t.hasDelay && t.state == "idle" && t.delay != tenths && t.sent != tenths {
+			out = append(out, path)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
+// bluealsaPCM is the BlueALSA sink PCM of a BlueZ device, for example /org/bluealsa/hci0/dev_X/a2dpsnk/source.
+func bluealsaPCM(device dbus.ObjectPath) dbus.ObjectPath {
+	return dbus.ObjectPath(strings.Replace(string(device), "/org/bluez/", "/org/bluealsa/", 1) + "/a2dpsnk/source")
+}
+
+// ReportDelay tells each phone how long the Pi holds its audio (A2DP delay reporting, AVDTP 1.3). The phone
+// delays its video by that much, as for AirPods. tenths is in 1/10 ms.
+func (b *bluezPhone) ReportDelay(ctx context.Context, tenths uint16) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-b.delayKick:
+		}
+		for _, path := range b.delayTargets(tenths) {
+			b.mu.Lock()
+			device := b.transports[path].device
+			b.mu.Unlock()
+			// BlueALSA adds the reported delay to the capture delay that alsaloop sees, and alsaloop would cut
+			// its buffer by that much. The adjustment takes it out again.
+			pcm := b.conn.Object(bluealsaName, bluealsaPCM(device))
+			codec := "SBC"
+			if v, err := pcm.GetProperty(ifBluealsa + ".Codec"); err == nil {
+				if c, ok := v.Value().(string); ok && c != "" {
+					codec = c
+				}
+			}
+			if err := pcm.Call(ifBluealsa+".SetDelayAdjustment", 0, codec, -int16(tenths)).Err; err != nil {
+				b.log.Warn("cannot set the BlueALSA delay adjustment", "pcm", bluealsaPCM(device), "err", err)
+			}
+			if err := b.setProp(path, ifTransport, "Delay", tenths); err != nil {
+				b.log.Info("delay report not sent yet", "transport", path, "err", err) // BlueALSA holds it: next idle
+				continue
+			}
+			b.mu.Lock()
+			if t := b.transports[path]; t != nil {
+				t.sent = tenths
+			}
+			b.mu.Unlock()
+			b.log.Info("delay reported to the phone", "transport", path, "ms", float64(tenths)/10, "codec", codec)
 		}
 	}
 }

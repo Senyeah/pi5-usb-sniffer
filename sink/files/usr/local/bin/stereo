@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-# Press a car stereo button on the Pi 3 sink. Usage: stereo playpause | next
+# Press a car stereo button on the Pi 3 sink. Usage: stereo playpause | next | back
 # It waits until the player has changed (up to 6 s: the phone is behind Bluetooth), then prints the state.
 import json, subprocess, sys, time
 
-BUTTONS = {"playpause": "toggle", "play-pause": "toggle", "pp": "toggle", "next": "stereo-next", "n": "stereo-next"}
+BUTTONS = {"playpause": "toggle", "play-pause": "toggle", "pp": "toggle", "next": "stereo-next", "n": "stereo-next",
+           "back": "stereo-back", "b": "stereo-back"}
 
 
 def ctl(*words):
@@ -18,11 +19,13 @@ def status():
 def line(d):
     ms = lambda v: "%d:%02d" % (v // 60000, v // 1000 % 60)
     who = " - ".join(x for x in (d["title"], d["artist"]) if x)
-    return "%s | track %s/%s | %s | %s/%s" % (d["play_state"], d["track"], d["num_tracks"], who or "(no title)", ms(d["position_ms"]), ms(d["length_ms"]))
+    out = "%s | track %s/%s | %s | %s/%s" % (d["play_state"], d["track"], d["num_tracks"], who or "(no title)", ms(d["position_ms"]), ms(d["length_ms"]))
+    errors = d.get("errors") or []
+    return out + (" | STEREO ERROR: " + "; ".join(errors) if errors else "")
 
 
 if len(sys.argv) != 2 or sys.argv[1] not in BUTTONS:
-    sys.exit("Usage: stereo playpause | next")
+    sys.exit("Usage: stereo playpause | next | back")
 cmd = BUTTONS[sys.argv[1]]
 
 before = status()
@@ -37,7 +40,9 @@ while time.time() < deadline:
     now = status() or now
     if cmd == "toggle" and now["play_state"] != before["play_state"]:
         break
-    if cmd == "stereo-next" and (now["track"] != before["track"] or now["title"] != before["title"]):
+    if cmd == "stereo-back" and now["position_ms"] + 1000 < before["position_ms"] and now["title"] == before["title"]:
+        break  # the same track again, from the start
+    if cmd in ("stereo-next", "stereo-back") and (now["track"] != before["track"] or now["title"] != before["title"]):
         time.sleep(0.8)  # the title and artist follow the index
         now = status() or now
         break

@@ -15,6 +15,7 @@ type track struct {
 // phoneState is a snapshot of the phone's AVRCP player.
 type phoneState struct {
 	Connected bool
+	Player    bool   // the phone has a media player (AVRCP)
 	Name      string // the phone's Bluetooth name
 	Status    string // playing, paused, stopped, forward-seek, reverse-seek, error
 	PosMS     uint32 // position at time At

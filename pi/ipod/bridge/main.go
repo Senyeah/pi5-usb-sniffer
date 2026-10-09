@@ -34,6 +34,8 @@ type config struct {
 	TraceHID    bool
 	AuthTimeout time.Duration
 	Reconnect   time.Duration // 0: do not connect to the phone by itself
+	PairAfter   time.Duration // 0: no pairing window by itself when no phone connects
+	ReportDelay time.Duration // reported to the phone (A2DP delay reporting), 0: off
 }
 
 func envStr(k, def string) string {
@@ -64,8 +66,16 @@ func loadConfig() config {
 			re = d
 		}
 	}
+	pa := 60 * time.Second
+	if v, ok := os.LookupEnv("IPOD_PAIR_AFTER"); ok {
+		if d, err := time.ParseDuration(v); err == nil {
+			pa = d
+		}
+	}
 	return config{
 		Reconnect:   re,
+		PairAfter:   pa,
+		ReportDelay: reportDelay(),
 		Hidg:        envStr("IPOD_HIDG", "/dev/hidg0"),
 		Gadget:      envStr("IPOD_GADGET", "/sys/kernel/config/usb_gadget/ipod"),
 		Name:        envStr("IPOD_NAME", ""),
@@ -76,6 +86,25 @@ func loadConfig() config {
 		TraceHID:    envBool("IPOD_TRACE_HID", true),
 		AuthTimeout: to,
 	}
+}
+
+// pipelineExtra is the Pi's delay beyond alsaloop's target, measured on the bench (pi/ipod/README.md section 12).
+const pipelineExtra = 0 * time.Millisecond
+
+// reportDelay is what the Pi adds between the phone and the stereo: alsaloop's target (the same setting as
+// ipod-audio), the rest of the pipeline, and IPOD_EXTRA_DELAY_MS for the stereo's own delay (not measured).
+func reportDelay() time.Duration {
+	if !envBool("IPOD_DELAY_REPORT", true) {
+		return 0
+	}
+	ms := func(k string, def int) time.Duration {
+		n, err := strconv.Atoi(os.Getenv(k))
+		if err != nil {
+			n = def
+		}
+		return time.Duration(n) * time.Millisecond
+	}
+	return ms("IPOD_AUDIO_LATENCY_MS", 500) + pipelineExtra + ms("IPOD_EXTRA_DELAY_MS", 0)
 }
 
 type server struct {
@@ -142,6 +171,26 @@ func run(ctx context.Context, cfg config) error {
 
 	if cfg.Reconnect > 0 {
 		go ph.Reconnect(ctx, cfg.Reconnect)
+	}
+	if cfg.ReportDelay > 0 {
+		tenths := min(cfg.ReportDelay/(100*time.Microsecond), 65535)
+		slog.Info("delay reporting on", "ms", cfg.ReportDelay.Milliseconds())
+		go ph.ReportDelay(ctx, uint16(tenths))
+	}
+	if cfg.PairAfter > 0 {
+		go func() { // a new phone has to be able to pair without SSH
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(cfg.PairAfter):
+			}
+			if !ph.AnyConnected() && !ph.pairingOpen() {
+				slog.Info("no phone is connected: pairing window open", "seconds", pairingSecs, "bluetooth_name", cfg.BTName)
+				if err := ph.OpenPairing(pairingSecs); err != nil {
+					slog.Warn("cannot open the pairing window", "err", err)
+				}
+			}
+		}()
 	}
 
 	srv := &server{cfg: cfg, ph: ph}
@@ -322,9 +371,10 @@ func readLoop(p *pod, fr ipod.FrameReader, stop func(error)) {
 	}
 }
 
-const ctlHelp = `commands: status | devices | pair [seconds] | toggle | play | pause | next | prev | help
+const ctlHelp = `commands: status | devices | pair [seconds] | forget <all|address|name> | toggle | play | pause | next | prev | help
   status   what the stereo and the phone report
   pair     make the Pi visible for pairing (default 600 s)
+  forget   remove the pairing of a phone, then open the pairing window if no phone is left
   toggle, play, pause, next, prev   press the button on the phone's player (AVRCP)`
 
 func (srv *server) control(line string) string {
@@ -351,6 +401,25 @@ func (srv *server) control(line string) string {
 			return "error: " + err.Error()
 		}
 		return fmt.Sprintf("pairing open for %d s: pair from the phone's Bluetooth settings (%s)", secs, srv.cfg.BTName)
+	case "forget":
+		if len(f) < 2 {
+			return "usage: forget all | <address> | <name>"
+		}
+		paths := srv.ph.matchDevices(strings.Join(f[1:], " "))
+		if len(paths) == 0 {
+			return "no such phone. See: devices"
+		}
+		var out []string
+		for _, path := range paths {
+			if err := srv.ph.Forget(path); err != nil {
+				return "error: " + err.Error()
+			}
+			out = append(out, "removed "+strings.TrimPrefix(string(path), "/org/bluez/hci0/"))
+		}
+		if srv.ph.OpenPairingIfUnpaired() {
+			out = append(out, fmt.Sprintf("pairing open for %d s: pair from the phone's Bluetooth settings (%s)", pairingSecs, srv.cfg.BTName))
+		}
+		return strings.Join(out, "\n")
 	case "toggle", "play", "pause", "next", "prev":
 		action := map[string]string{"play": "play", "pause": "pause", "next": "next", "prev": "previous"}[f[0]]
 		if f[0] == "toggle" {

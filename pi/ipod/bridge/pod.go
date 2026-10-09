@@ -24,6 +24,7 @@ type options struct {
 	NotifyEvery time.Duration // track time notifications
 	TrackSettle time.Duration // the phone sends the data of a new track in steps: wait until it is complete
 	AttrEvery   time.Duration // TrackNewAudioAttributes repeat
+	AttrTries   int           // TrackNewAudioAttributes repeats per start, until the stereo acks
 	SampleRate  uint32
 	Trace       *tracer
 	Log         *slog.Logger
@@ -36,6 +37,7 @@ func defaultOptions() options {
 		NotifyEvery: 500 * time.Millisecond,
 		TrackSettle: 800 * time.Millisecond,
 		AttrEvery:   500 * time.Millisecond,
+		AttrTries:   40,
 		SampleRate:  44100,
 		Log:         slog.Default(),
 	}
@@ -54,6 +56,19 @@ var (
 	protocolVersions   = map[byte][2]byte{lGeneral: {1, 9}, lExt: {1, 14}, lAudio: {1, 2}}
 )
 
+// The stereo wraps "next" to index 0 at the last track count it read, and that count is often older than the
+// index. A large list with the index in the middle keeps both ends away.
+const (
+	virtualCount = 1000
+	virtualStart = 500
+	maxSkips     = 5 // one SetCurrentPlayingTrack moves at most this many tracks
+	skipGap      = 300 * time.Millisecond
+	waitingText  = "Waiting"
+)
+
+// waitingTrack plays (silence) while no phone has track data: a stopped, empty iPod makes the stereo show "Unsupported".
+var waitingTrack = track{Title: waitingText, Artist: waitingText, Album: waitingText, Genre: waitingText, DurationMS: 3600000}
+
 // pod is the iPod: it answers the stereo and takes its data from the phone. One goroutine runs it through ev.
 type pod struct {
 	o    options
@@ -65,7 +80,10 @@ type pod struct {
 
 	notify      bool // the stereo asked for play status change notifications
 	attrAcked   bool
+	attrEver    bool // the stereo acked the attributes once in this session
 	attrTries   int
+	attrLoop    bool // a repeat of TrackNewAudioAttributes is scheduled
+	wasPlaying  bool
 	authPassed  bool
 	identified  bool
 	certBytes   int
@@ -75,23 +93,33 @@ type pod struct {
 	rxNames     map[string]int
 	lastCommand string
 
-	// The stereo sees a playlist with one track more than the current one, so "next" always has a target.
-	idx        int32
-	cur        track
-	hist       []track // hist[0] is the previous track
-	pendingDir int32
-	pendingAt  time.Time
-	candidate  track // a track change that is not settled yet
-	candSince  time.Time
+	// A virtual playlist: idx counts the track changes, from virtualStart.
+	idx       int32
+	cur       track
+	hist      []track // hist[0] is the previous track
+	pendingTo int32   // the index that a skip goes to, 0: none
+	pendingAt time.Time
+	pressIdx  int32 // the index when the stereo pressed next or previous
+	pressAt   time.Time
+	candidate track // a track change that is not settled yet
+	candSince time.Time
+
+	// While no phone has track data, the stereo plays waitingTrack. Its play state is the stereo's.
+	waitPlaying bool
+	inWaiting   bool
+	waitPos     uint32
+	waitAt      time.Time
+	phoneReady  bool // a phone with a player was there at the last check
 }
 
 func newPod(o options, fw ipod.FrameWriter, ph phone, stop func(error)) *pod {
 	return &pod{
 		o: o, fw: fw, ph: ph, stop: stop,
-		ev:      make(chan func(), 256),
-		done:    make(chan struct{}),
-		rxNames: map[string]int{},
-		idx:     1,
+		ev:          make(chan func(), 256),
+		done:        make(chan struct{}),
+		rxNames:     map[string]int{},
+		idx:         virtualStart,
+		waitPlaying: true,
 	}
 }
 
@@ -136,7 +164,9 @@ func (p *pod) call(f func() string) string {
 // start follows the phone and sends the track time ticks.
 func (p *pod) start() {
 	p.post(func() {
-		p.cur = p.ph.State().Track // what the phone plays when the stereo connects is no change
+		st := p.ph.State()
+		p.phoneReady = st.Connected && st.Player
+		p.cur = p.view().Track // what the phone plays when the stereo connects is no change
 		p.after(p.o.NotifyEvery, p.tick)
 	})
 	go func() {
@@ -198,11 +228,62 @@ func (p *pod) name() string {
 	return "iPod"
 }
 
+func waiting(st phoneState) bool { return !st.Connected || st.Track == (track{}) }
+
+// view is what the stereo sees: the phone, or waitingTrack.
+func (p *pod) view() phoneState {
+	st := p.ph.State()
+	if !waiting(st) {
+		p.inWaiting = false
+		return st
+	}
+	now := time.Now()
+	if !p.inWaiting {
+		p.inWaiting, p.waitPos, p.waitAt = true, 0, now
+	}
+	v := phoneState{Connected: st.Connected, Name: st.Name, Status: "paused", PosMS: p.waitPos, At: p.waitAt, Track: waitingTrack}
+	if p.waitPlaying {
+		v.Status = "playing"
+		if v.position(now) >= waitingTrack.DurationMS {
+			p.waitPos, p.waitAt = 0, now
+			v.PosMS, v.At = 0, now
+		}
+	}
+	return v
+}
+
+// setPlaying keeps the stereo's play state: the state of waitingTrack, and what a phone gets when it connects.
+func (p *pod) setPlaying(on bool) {
+	if p.inWaiting && on != p.waitPlaying {
+		now := time.Now()
+		p.waitPos, p.waitAt = p.view().position(now), now
+	}
+	p.waitPlaying = on
+}
+
+// followPhone starts a phone that comes while the stereo plays, and else follows the phone's play state.
+func (p *pod) followPhone() {
+	st := p.ph.State()
+	ready := st.Connected && st.Player
+	playing := iapPlayState(st.Status) == 1
+	switch {
+	case ready && !p.phoneReady:
+		if p.waitPlaying && !playing {
+			p.o.Log.Info("phone connected while the stereo plays: play")
+			go p.logErr("play", p.ph.Control("play"))
+		}
+	case ready:
+		p.waitPlaying = playing
+	}
+	p.phoneReady = ready
+}
+
 // syncPhone follows track changes of the phone. The phone sends the data of a new track in two or more
 // steps (the album first, the title later), so a change counts after the data has been the same for TrackSettle.
 func (p *pod) syncPhone() {
-	st := p.ph.State()
-	if st.Track == p.cur || st.Track == (track{}) {
+	p.followPhone()
+	st := p.view()
+	if st.Track == p.cur {
 		p.candidate = track{}
 		return
 	}
@@ -215,14 +296,16 @@ func (p *pod) syncPhone() {
 		return
 	}
 	p.candidate = track{}
-	dir := int32(1)
-	if p.pendingDir != 0 && time.Since(p.pendingAt) < 8*time.Second {
-		dir = p.pendingDir
+	to := p.idx + 1
+	if p.pendingTo != 0 && time.Since(p.pendingAt) < 8*time.Second {
+		to = p.pendingTo
 	}
-	p.pendingDir = 0
-	if p.cur == (track{}) { // the first data of the phone, after the stereo connected: a new track for the stereo
-		dir = 1
-	} else if dir > 0 {
+	p.pendingTo = 0
+	if to == p.idx { // a new track needs a new index, or the stereo keeps the old data
+		to++
+	}
+	to = min(max(to, 1), virtualCount-2)
+	if to > p.idx {
 		p.hist = append([]track{p.cur}, p.hist...)
 		if len(p.hist) > 4 {
 			p.hist = p.hist[:4]
@@ -230,19 +313,23 @@ func (p *pod) syncPhone() {
 	} else if len(p.hist) > 0 {
 		p.hist = p.hist[1:]
 	}
-	p.cur = st.Track
-	if p.idx+dir >= 0 {
-		p.idx += dir
-	}
+	p.cur, p.idx = st.Track, to
 	p.o.Log.Info("track changed", "index", p.idx, "title", p.cur.Title, "artist", p.cur.Artist, "album", p.cur.Album)
 	if p.notify {
 		p.send("PlayStatusChangeNotification track index", ext(0x27), append([]byte{0x01}, be32(uint32(p.idx))...))
 	}
+	p.restartAttributes()
 }
 
 func (p *pod) tick() {
 	p.syncPhone()
-	st := p.ph.State()
+	st := p.view()
+	if playing := iapPlayState(st.Status) == 1; playing != p.wasPlaying {
+		p.wasPlaying = playing
+		if playing {
+			p.restartAttributes()
+		}
+	}
 	if p.notify && iapPlayState(st.Status) == 1 {
 		p.send("PlayStatusChangeNotification track time ms", ext(0x27), append([]byte{0x04}, be32(st.position(time.Now()))...))
 	}
@@ -251,7 +338,7 @@ func (p *pod) tick() {
 
 func (p *pod) trackAt(n int32) track {
 	switch {
-	case n < 0 || n == p.idx:
+	case p.cur == waitingTrack || n < 0 || n == p.idx:
 		return p.cur
 	case n == p.idx-1 && len(p.hist) > 0:
 		return p.hist[0]
@@ -259,7 +346,7 @@ func (p *pod) trackAt(n int32) track {
 	return track{}
 }
 
-func (p *pod) count() uint32 { return uint32(p.idx) + 2 }
+func (p *pod) count() uint32 { return virtualCount }
 
 // onRx handles one packet from the stereo.
 func (p *pod) onRx(r rx) {
@@ -351,20 +438,32 @@ func (p *pod) passAuthentication(why string) {
 
 // sendAttributes repeats TrackNewAudioAttributes until the stereo acks it, as the iPad does.
 func (p *pod) sendAttributes() {
-	if p.attrAcked || p.attrTries >= 40 {
+	if p.attrAcked || p.attrTries >= p.o.AttrTries {
+		p.attrLoop = false
 		return
 	}
 	p.attrTries++
 	args := append(append(be32(p.o.SampleRate), be32(0)...), be32(0)...) // sample rate, sound check, volume adjustment
 	p.send("TrackNewAudioAttributes", cid(lAudio, 0x04), args)
+	p.attrLoop = true
 	p.after(p.o.AttrEvery, p.sendAttributes)
+}
+
+// restartAttributes sends the attributes again at a new track or a new start of play, until the stereo has acked
+// once. The car stereo acks once per connection; more repeats after that may disturb its audio.
+func (p *pod) restartAttributes() {
+	if !p.identified || p.attrLoop || p.attrEver {
+		return
+	}
+	p.attrAcked, p.attrTries = false, 0
+	p.sendAttributes()
 }
 
 func (p *pod) onAudio(r rx) {
 	switch r.id.CmdID() {
 	case 0x00: // AccessoryAck: status, command
 		if len(r.args) >= 2 && r.args[1] == 0x04 {
-			p.attrAcked = true
+			p.attrAcked, p.attrEver = true, true
 		}
 	}
 }
@@ -372,7 +471,7 @@ func (p *pod) onAudio(r rx) {
 func (p *pod) onExt(r rx) {
 	cmd := r.id.CmdID()
 	a := r.args
-	st := p.ph.State()
+	st := p.view()
 	switch cmd {
 	case 0x39: // GetColorDisplayImageLimits
 		p.send("ReturnColorDisplayImageLimits", ext(0x3A), colorDisplayLimits)
@@ -417,12 +516,18 @@ func (p *pod) onExt(r rx) {
 		p.send("ReturnNumPlayingTracks", ext(0x36), be32(p.count()))
 	case 0x14: // RequestiPodName
 		p.send("ReturniPodName", ext(0x15), cstr(p.name()))
+	case 0x28: // PlayCurrentSelection: the stereo starts play like this when the iPod is stopped
+		p.setPlaying(true)
+		if ph := p.ph.State(); ph.Connected && iapPlayState(ph.Status) != 1 {
+			go p.logErr("play", p.ph.Control("play"))
+		}
+		p.ackExt(cmd, ackOK)
 	case 0x29: // PlayControl
 		if len(a) < 1 {
 			p.ackExt(cmd, ackFailed)
 			return
 		}
-		p.ackExt(cmd, p.playControl(a[0], st))
+		p.ackExt(cmd, p.playControl(a[0]))
 	case 0x02: // GetCurrentPlayingTrackChapterInfo
 		p.send("ReturnCurrentPlayingTrackChapterInfo", ext(0x03), chapterInfoNone)
 	case 0x0C: // GetIndexedPlayingTrackInfo: type, track, chapter
@@ -438,18 +543,12 @@ func (p *pod) onExt(r rx) {
 			value string
 		}{0x20: {"ReturnIndexedPlayingTrackTitle", t.Title}, 0x22: {"ReturnIndexedPlayingTrackArtistName", t.Artist}, 0x24: {"ReturnIndexedPlayingTrackAlbumName", t.Album}}[cmd]
 		p.send(s.name, ext(cmd+1), cstr(s.value))
-	case 0x37: // SetCurrentPlayingTrack: a higher index is "next", a lower one is "previous"
+	case 0x37: // SetCurrentPlayingTrack: the stereo's next and previous buttons, as an index
 		if len(a) < 4 {
 			p.ackExt(cmd, ackFailed)
 			return
 		}
-		n := int32(binary.BigEndian.Uint32(a))
-		switch {
-		case n > p.idx:
-			p.skip(1, "next")
-		case n < p.idx:
-			p.skip(-1, "previous")
-		}
+		p.setTrack(int32(binary.BigEndian.Uint32(a)))
 		p.ackExt(cmd, ackOK)
 	default:
 		p.ackExt(cmd, ackUnknown)
@@ -462,17 +561,63 @@ func (p *pod) logErr(what string, err error) {
 	}
 }
 
-// skip asks the phone for the next or previous track. The track change comes back from the phone.
-func (p *pod) skip(dir int32, action string) {
-	p.pendingDir, p.pendingAt = dir, time.Now()
-	go p.logErr(action, p.ph.Control(action))
+// stepsTo is the number of tracks from index from to index n, negative for back. The stereo wraps at the end
+// of its list, so the short way round counts. At most maxSkips.
+func stepsTo(from, n int32) int32 {
+	d := n - from
+	if d > virtualCount/2 {
+		d -= virtualCount
+	} else if d < -virtualCount/2 {
+		d += virtualCount
+	}
+	return max(min(d, maxSkips), -maxSkips)
 }
 
-func (p *pod) playControl(action byte, st phoneState) byte {
-	run := func(a string) { go p.logErr(a, p.ph.Control(a)) }
-	if !st.Connected && action != 0x07 {
-		return ackFailed
+// setTrack goes to the index that the stereo asks for, with next or previous commands to the phone.
+func (p *pod) setTrack(n int32) {
+	if n == p.pressIdx && time.Since(p.pressAt) < 3*time.Second {
+		return // the back button sends "previous", then the index it had: the skip is under way already
 	}
+	if d := stepsTo(p.idx, n); d != 0 && p.ph.State().Connected {
+		p.skip(d)
+	}
+}
+
+// skip asks the phone for n tracks forward, or back for n < 0. The track change comes back from the phone.
+func (p *pod) skip(n int32) {
+	action, steps := "next", n
+	if n < 0 {
+		action, steps = "previous", -n
+	}
+	p.pendingTo, p.pendingAt = p.idx+n, time.Now()
+	go func() {
+		for i := int32(0); i < steps; i++ {
+			if i > 0 {
+				time.Sleep(skipGap)
+			}
+			if err := p.ph.Control(action); err != nil {
+				p.logErr(action, err)
+				return
+			}
+		}
+	}()
+}
+
+func (p *pod) playControl(action byte) byte {
+	playing := iapPlayState(p.view().Status) == 1 // as the stereo sees it
+	switch action {
+	case 0x01:
+		p.setPlaying(!playing)
+	case 0x02, 0x0B:
+		p.setPlaying(false)
+	case 0x0A:
+		p.setPlaying(true)
+	}
+	st := p.ph.State()
+	if !st.Connected { // an error reply makes the stereo show "ERROR": waitingTrack follows the stereo instead
+		return ackOK
+	}
+	run := func(a string) { go p.logErr(a, p.ph.Control(a)) }
 	switch action {
 	case 0x01: // toggle
 		if iapPlayState(st.Status) == 1 {
@@ -483,9 +628,11 @@ func (p *pod) playControl(action byte, st phoneState) byte {
 	case 0x02:
 		run("stop")
 	case 0x03, 0x08:
-		p.skip(1, "next")
+		p.pressIdx, p.pressAt = p.idx, time.Now()
+		p.skip(1)
 	case 0x04, 0x09:
-		p.skip(-1, "previous")
+		p.pressIdx, p.pressAt = p.idx, time.Now()
+		p.skip(-1)
 	case 0x05:
 		run("fastforward")
 	case 0x06:
@@ -518,7 +665,11 @@ func (p *pod) trackInfo(a []byte, st phoneState) {
 	case 0x05: // genre
 		p.send("ReturnIndexedPlayingTrackInfo genre", ext(0x0D), append([]byte{kind}, cstr(t.Genre)...))
 	case 0x06: // composer
-		p.send("ReturnIndexedPlayingTrackInfo composer", ext(0x0D), append([]byte{kind}, cstr("")...))
+		c := ""
+		if t == waitingTrack {
+			c = waitingText
+		}
+		p.send("ReturnIndexedPlayingTrackInfo composer", ext(0x0D), append([]byte{kind}, cstr(c)...))
 	default:
 		p.ackExt(0x0C, ackFailed)
 	}
@@ -566,6 +717,7 @@ func repeatFromIAP(b byte) string {
 
 type podStatus struct {
 	Phone      phoneState     `json:"phone"`
+	Sees       phoneState     `json:"stereo_sees"`
 	Index      int32          `json:"index"`
 	NumTracks  uint32         `json:"num_tracks"`
 	Notify     bool           `json:"notifications"`
@@ -580,7 +732,7 @@ type podStatus struct {
 
 func (p *pod) status() string {
 	b, _ := json.MarshalIndent(podStatus{
-		Phone: p.ph.State(), Index: p.idx, NumTracks: p.count(), Notify: p.notify,
+		Phone: p.ph.State(), Sees: p.view(), Index: p.idx, NumTracks: p.count(), Notify: p.notify,
 		Identified: p.identified, AuthPassed: p.authPassed, CertBytes: p.certBytes, AttrAcked: p.attrAcked,
 		Tx: p.txCount, Rx: p.rxCount, RxByName: p.rxNames,
 	}, "", "  ")

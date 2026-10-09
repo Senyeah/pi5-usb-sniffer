@@ -67,7 +67,7 @@ type fakePhone struct {
 func newFakePhone() *fakePhone {
 	return &fakePhone{
 		ch: make(chan struct{}, 1),
-		st: phoneState{Connected: true, Name: "Test Phone", Status: "playing", At: time.Now(),
+		st: phoneState{Connected: true, Player: true, Name: "Test Phone", Status: "playing", At: time.Now(),
 			Track: track{Title: "Song A", Artist: "Artist A", Album: "Album A", Genre: "Pop", DurationMS: 340373}},
 	}
 }

@@ -32,14 +32,16 @@ func TestRequestsMatchCapture(t *testing.T) {
 		{initFirst[7], "550304002fca"},
 		{initSecond[0], "550304001cdd"},
 		{initSecond[1], "550404001805db"},
-		{initSecond[2], "550404002601d1"},
-		{initSecond[3], "550304002ccd"},
-		{initSecond[4], "5503040009f0"},
-		{initSecond[5], "550304001edb"},
-		{initSecond[6], "5503040035c4"},
-		{initSecond[7], "5503040014e5"},
-		{initSecond[8], "550404002907c8"},
-		{initSecond[9], "5503040002f7"},
+		{initSecond[2], "5507040028ffffffffd1"}, // PlayCurrentSelection, seen with a stopped iPod in the car on 09/10/2026
+		{initSecond[3], "550404002901ce"},
+		{initSecond[4], "550404002601d1"},
+		{initSecond[5], "550304002ccd"},
+		{initSecond[6], "5503040009f0"},
+		{initSecond[7], "550304001edb"},
+		{initSecond[8], "5503040035c4"},
+		{initSecond[9], "5503040014e5"},
+		{initSecond[10], "550404002907c8"},
+		{initSecond[11], "5503040002f7"},
 		{stepPlayControl(0x01), "550404002901ce"},
 		{stepTrackQuery("album", 0x24, 2), "550704002400000002cf"},
 		{stepTrackQuery("title", 0x20, 2), "550704002000000002d3"},
@@ -80,6 +82,7 @@ type fakePod struct {
 	got   []rx
 	state byte
 	track int32
+	fail  map[uint16]byte // error status for the ACK of these commands
 }
 
 func newFakePod(conn io.ReadWriter, defs hid.ReportDefs) *fakePod {
@@ -177,13 +180,26 @@ func (p *fakePod) reply(r rx) {
 		p.send(ext(0x36), u32(3)...)
 	case ext(0x14):
 		p.send(ext(0x15), []byte("Test iPad\x00")...)
-	case ext(0x29):
-		if r.args[0] == 0x01 {
-			p.mu.Lock()
-			p.state = 3 - p.state // 1 <-> 2
-			p.mu.Unlock()
+	case ext(0x28): // PlayCurrentSelection
+		p.mu.Lock()
+		status := p.fail[0x28]
+		if status == 0 {
+			p.state = 1
 		}
-		p.ackExt(0x29)
+		p.mu.Unlock()
+		p.send(ext(1), status, 0x00, 0x28)
+	case ext(0x29):
+		p.mu.Lock()
+		status := p.fail[0x29]
+		if r.args[0] == 0x01 && status == 0 {
+			if p.state == 1 {
+				p.state = 2
+			} else {
+				p.state = 1
+			}
+		}
+		p.mu.Unlock()
+		p.send(ext(1), status, 0x00, 0x29)
 	case ext(0x02):
 		p.send(ext(0x03), 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0)
 	case ext(0x37):
@@ -311,6 +327,9 @@ func TestStereoSessionAgainstFakeIPod(t *testing.T) {
 			}
 			pos = c1
 			for _, s := range append(append([]step(nil), initFirst...), initSecond...) {
+				if s.ifStopped { // the fake iPod is paused
+					continue
+				}
 				i := indexOf(got, pos, s.id, -1)
 				if i < 0 {
 					t.Fatalf("init step %q missing after position %d", s.name, pos)
@@ -411,6 +430,110 @@ func TestStereoNextButton(t *testing.T) {
 		want, _ := encodeFrame(c.wantID, c.want)
 		if got := rec.frames()[0]; !bytes.Equal(got, want) {
 			t.Errorf("%s: sent %x, want %x", c.name, got, want)
+		}
+		close(s.done)
+	}
+}
+
+func startAgainst(t *testing.T, pod *fakePod, o options) *stereo {
+	t.Helper()
+	defs := tableFor(t, fullSpeedDescHex)
+	accConn, podConn, closeAll := pipePair()
+	t.Cleanup(closeAll)
+	pod.enc = hid.NewEncoder(hid.NewReportWriter(podConn), defs)
+	pod.dec = hid.NewDecoder(hid.NewReportReader(podConn), defs)
+	go pod.run()
+	fr, fw := newLink(accConn, defs, nil)
+	st := newStereo(o, fw, func(error) {})
+	go st.loop()
+	t.Cleanup(func() { close(st.done) })
+	go readLoop(st, fr, st.stop)
+	st.start()
+	return st
+}
+
+// With a stopped iPod the real stereo starts play by itself, between the two track counts of the init script.
+func TestStoppedIPodMakesTheStereoStartPlay(t *testing.T) {
+	pod := &fakePod{state: 0, track: 1}
+	o := testOptions(make([]byte, 946))
+	o.Autoplay = false
+	st := startAgainst(t, pod, o)
+	waitFor(t, "init", func() bool { return statusOf(t, st).InitDone })
+	got := pod.received()
+	count := indexOf(got, 0, ext(0x18), -1)
+	sel := indexOf(got, 0, ext(0x28), -1)
+	toggle := indexOf(got, 0, ext(0x29), 0x01)
+	notify := indexOf(got, 0, ext(0x26), -1)
+	if !(count >= 0 && count < sel && sel < toggle && toggle < notify) {
+		t.Fatalf("order: track count %d, PlayCurrentSelection %d, toggle %d, notifications %d", count, sel, toggle, notify)
+	}
+	if !bytes.Equal(got[sel].args, []byte{0xFF, 0xFF, 0xFF, 0xFF}) {
+		t.Errorf("PlayCurrentSelection args %x", got[sel].args)
+	}
+	if d := statusOf(t, st); len(d.Errors) != 0 {
+		t.Errorf("errors %v with an iPod that says OK", d.Errors)
+	}
+}
+
+// Both commands failed in the car. The stereo shows that to the driver, so the test stereo must report it.
+func TestErrorRepliesAreReported(t *testing.T) {
+	pod := &fakePod{state: 0, track: 1, fail: map[uint16]byte{0x28: 5, 0x29: 2}}
+	o := testOptions(make([]byte, 946))
+	o.Autoplay = false
+	st := startAgainst(t, pod, o)
+	waitFor(t, "init", func() bool { return statusOf(t, st).InitDone })
+	errs := statusOf(t, st).Errors
+	want := map[string]bool{"PlayCurrentSelection: status 5": false, "PlayControl: status 2": false}
+	for _, e := range errs {
+		if _, ok := want[e]; ok {
+			want[e] = true
+		}
+	}
+	for e, seen := range want {
+		if !seen {
+			t.Errorf("error %q missing from %v", e, errs)
+		}
+	}
+}
+
+// Car-10 had a paused iPad: the stereo did not start play in the init script.
+func TestPausedIPodGetsNoPlayCurrentSelection(t *testing.T) {
+	pod := &fakePod{state: 2, track: 1}
+	o := testOptions(make([]byte, 946))
+	o.Autoplay = false
+	st := startAgainst(t, pod, o)
+	waitFor(t, "init", func() bool { return statusOf(t, st).InitDone })
+	if i := indexOf(pod.received(), 0, ext(0x28), -1); i >= 0 {
+		t.Error("PlayCurrentSelection sent to a paused iPod")
+	}
+}
+
+func TestStereoBackButton(t *testing.T) {
+	cases := []struct {
+		name          string
+		track, tracks int32
+		pos           uint32
+		want          [][]byte // first frames, as payloads: lingo, command, args
+	}{
+		{"early in the track: previous index", 3, 6, 500, [][]byte{{0x04, 0x00, 0x37, 0, 0, 0, 2}}},
+		{"index 0 wraps to the end", 0, 6, 500, [][]byte{{0x04, 0x00, 0x37, 0, 0, 0, 5}}},
+		{"later in the track: restart", 3, 6, 7900, [][]byte{{0x04, 0x00, 0x29, 0x01}, {0x04, 0x00, 0x29, 0x04}}},
+	}
+	for _, c := range cases {
+		rec := &recordingFrames{}
+		s := newStereo(testOptions(nil), rec, func(error) {})
+		go s.loop()
+		s.post(func() { s.track, s.numTracks, s.pos = c.track, uint32(c.tracks), c.pos })
+		if r := s.call(func() string { return s.control("stereo-back") }); r != "ok" {
+			t.Fatal(r)
+		}
+		waitFor(t, c.name, func() bool { return rec.count() >= len(c.want) })
+		for i, w := range c.want {
+			r, _ := parsePayload(w)
+			want, _ := encodeFrame(r.id, r.args)
+			if got := rec.frames()[i]; !bytes.Equal(got, want) {
+				t.Errorf("%s: frame %d %x, want %x", c.name, i, got, want)
+			}
 		}
 		close(s.done)
 	}

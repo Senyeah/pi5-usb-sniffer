@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Plays the phone's Bluetooth audio into the iPod USB gadget, IPOD_AUDIO_GAIN_DB lower (default -6 dB).
+# The car stereo clips loud songs at the full digital level. The decoded stream itself does not clip.
+# alsaloop holds the delay at IPOD_AUDIO_LATENCY_MS (default 500): the phone's clock and the stereo's USB
+# clock differ a little, and alsaloop resamples, so the delay that ipod-bridge reports to the phone stays right.
+set -u
+
+db=${IPOD_AUDIO_GAIN_DB:--6}
+if ! [[ $db =~ ^-?[0-9]+([.][0-9]+)?$ ]]; then
+  echo "IPOD_AUDIO_GAIN_DB=$db is not a number of dB: using -6" >&2
+  db=-6
+fi
+# A gain above 0 dB would clip again.
+gain=$(awk -v db="$db" 'BEGIN { g = 10 ^ (db / 20); if (g > 1) g = 1; printf "%.4f", g }')
+
+lat=${IPOD_AUDIO_LATENCY_MS:-500}
+if ! [[ $lat =~ ^[0-9]+$ ]] || [ "$lat" -lt 50 ]; then
+  echo "IPOD_AUDIO_LATENCY_MS=$lat is not a number of ms (at least 50): using 500" >&2
+  lat=500
+fi
+echo "gain $db dB (factor $gain), delay $lat ms"
+
+# IPOD_AUDIO_PLAYER=aplay: the earlier player. It keeps its 0.5 s buffer full, but does not follow the clocks,
+# so the delay can grow during a drive.
+if [ "${IPOD_AUDIO_PLAYER:-alsaloop}" = aplay ]; then
+  exec /usr/bin/bluealsa-aplay -S --profile-a2dp --volume=none --pcm="ipod_gain:GAIN=$gain" \
+    --pcm-buffer-time=$((lat * 1000)) --pcm-period-time=50000
+fi
+
+# The BlueALSA PCM exists while a phone is connected. 00:00:00:00:00:00 is the latest connected phone.
+while :; do
+  if bluealsa-cli list-pcms 2>/dev/null | grep -q '/a2dpsnk/source$'; then
+    # -S 4: sync by resampling (libsamplerate), -A 2: its fastest sinc converter.
+    # shellcheck disable=SC2086
+    alsaloop -C "bluealsa:DEV=00:00:00:00:00:00,PROFILE=a2dp" -P "ipod_gain:GAIN=$gain" \
+      -c 2 -r 44100 -f S16_LE -t $((lat * 1000)) -S 4 -A 2 ${IPOD_ALSALOOP_ARGS:-}
+    echo "alsaloop stopped with status $?, retry in 1 s"
+  fi
+  sleep 1
+done

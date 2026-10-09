@@ -57,6 +57,7 @@ type step struct {
 	expect    func(rx) bool // nil: do not wait
 	pause     time.Duration // wait before the request
 	pauseOnly bool
+	ifStopped bool // only when the iPod said "stopped"
 	sent      bool
 }
 
@@ -98,6 +99,10 @@ var (
 	initSecond = []step{
 		stepGetPlayStatus,
 		{name: "GetNumberCategorizedDBRecords track", id: ext(0x18), args: []byte{0x05}, expect: wantReply(ext(0x19))},
+		// Seen in the car with a stopped iPod (Pi 5 session of 09/10/2026): the stereo starts play itself.
+		// An error reply to either command shows as "ERROR 2" or "UNSUPPORTED" on the stereo.
+		{name: "PlayCurrentSelection", id: ext(0x28), args: []byte{0xFF, 0xFF, 0xFF, 0xFF}, expect: wantAck(lExt, 0x28), ifStopped: true},
+		{name: "PlayControl 0x1 (stopped)", id: ext(0x29), args: []byte{0x01}, expect: wantAck(lExt, 0x29), ifStopped: true},
 		{name: "SetPlayStatusChangeNotification", id: ext(0x26), args: []byte{0x01}, expect: wantAck(lExt, 0x26)},
 		{name: "GetShuffle", id: ext(0x2C), expect: wantReply(ext(0x2D))},
 		{name: "GetAudiobookSpeed", id: ext(0x09), expect: wantReply(ext(0x0A))},
@@ -158,6 +163,7 @@ type stereo struct {
 	txCount, rxCount int
 	rxNames          map[string]int
 	lastErr          string
+	errors           []string          // iPod replies that make the real stereo show an error
 	meta             map[string]string // device facts set by the session
 }
 
@@ -273,6 +279,10 @@ func (s *stereo) advance() {
 	s.busy = true
 	st := s.queue[0]
 	s.queue = s.queue[1:]
+	if st.ifStopped && s.playState != 0 {
+		s.advance()
+		return
+	}
 	s.cur = &st
 	s.curTimer = s.after(st.pause, func() { s.fire(&st) })
 }
@@ -461,7 +471,34 @@ func (s *stereo) onRx(r rx) {
 			s.queryMeta()
 		}
 	}
+	s.checkAck(r)
 	s.consume(r)
+}
+
+var ackedNames = map[uint16]string{0x16: "ResetDBSelection", 0x26: "SetPlayStatusChangeNotification", 0x28: "PlayCurrentSelection",
+	0x29: "PlayControl", 0x37: "SetCurrentPlayingTrack"}
+
+// checkAck notes an error reply. The stereo shows one to the driver; it is the first sign of a bug in the iPod.
+func (s *stereo) checkAck(r rx) {
+	var cmd uint16
+	var status byte
+	switch {
+	case r.id == cid(lExt, 0x0001) && len(r.args) >= 3:
+		status, cmd = r.args[0], binary.BigEndian.Uint16(r.args[1:3])
+	case r.id == cid(lGeneral, 0x02) && len(r.args) >= 2:
+		status, cmd = r.args[0], uint16(r.args[1])
+	default:
+		return
+	}
+	if status == 0x00 || status == 0x06 { // success, "command pending"
+		return
+	}
+	name, ok := ackedNames[cmd]
+	if !ok {
+		name = fmt.Sprintf("command %#x", cmd)
+	}
+	s.errors = append(s.errors, fmt.Sprintf("%s: status %d", name, status))
+	s.o.Log.Warn("the iPod replied with an error: a real stereo shows ERROR or UNSUPPORTED", "cmd", name, "status", status)
 }
 
 func (s *stereo) logNowPlaying() {
@@ -530,6 +567,7 @@ type statusDoc struct {
 	Tx         int               `json:"packets_sent"`
 	Rx         int               `json:"packets_received"`
 	RxByName   map[string]int    `json:"received_by_name"`
+	Errors     []string          `json:"errors"`
 }
 
 func (s *stereo) status() string {
@@ -541,12 +579,15 @@ func (s *stereo) status() string {
 		Device: s.meta, InitDone: s.initDone, CertSent: s.identified, PlayState: state,
 		PositionMS: s.pos, LengthMS: s.length, Track: s.track, NumTracks: s.numTracks,
 		Title: s.title, Artist: s.artist, Album: s.album, IPodName: s.podName, IPodSW: s.podSW,
-		Tx: s.txCount, Rx: s.rxCount, RxByName: s.rxNames,
+		Tx: s.txCount, Rx: s.rxCount, RxByName: s.rxNames, Errors: s.errors,
 	}, "", "  ")
 	return string(b)
 }
 
-const helpText = `commands: status | toggle | stereo-next | play | pause | stop | next | prev | ffwd | rew | endff |
+// The stereo restarted the track at 2.2 s into it and went to the previous one at 1.1 s.
+const backRestartMS = 2000
+
+const helpText = `commands: status | toggle | stereo-next | stereo-back | play | pause | stop | next | prev | ffwd | rew | endff |
           track <n> | raw <hex of lingo,command,args> | help`
 
 // control runs one command line from the control socket.
@@ -579,6 +620,23 @@ func (s *stereo) control(line string) string {
 			s.enqueue(stepSetTrack(n), stepPlayControl(0x07))
 		} else { // the iPhone reports an index beyond its track count: an index would jump to a wrong track
 			s.enqueue(stepPlayControl(0x08))
+		}
+	case "stereo-back": // the stereo's back button, as seen in the car on 09/10/2026
+		if s.pos >= backRestartMS { // restart the track: pause, previous track, the same index 1.2 s later, play
+			set := stepSetTrack(s.track)
+			set.pause = 1200 * time.Millisecond
+			s.enqueue(stepPlayControl(0x01), stepPlayControl(0x04), set, stepPlayControl(0x07))
+			s.after(3*time.Second, func() {
+				if s.playState == 2 {
+					s.pressToggle()
+				}
+			})
+		} else {
+			n := s.track - 1
+			if n < 0 && s.numTracks > 0 { // wraps to the end of the list, as the stereo does
+				n = int32(s.numTracks) - 1
+			}
+			s.enqueue(stepSetTrack(n), stepPlayControl(0x07))
 		}
 	case "next":
 		s.enqueue(stepPlayControl(0x08)) // iAP1 PlayControl "Next"

@@ -15,9 +15,10 @@ From your Mac, one line each (the Pi 3 must have a connected Apple device):
 ```bash
 ssh root@pi3-sink.local stereo playpause
 ssh root@pi3-sink.local stereo next
+ssh root@pi3-sink.local stereo back
 ```
 
-`stereo` sends what the car stereo sends for the button, waits up to 6 s for the player to change, and prints the result, for example `playing | track 4/12 | Title - Artist | 0:42/3:15`. `playpause` sends end-fast-forward/rewind and then toggle. `next` sends `SetCurrentPlayingTrack(index + 1)` and end-fast-forward/rewind. It sends `PlayControl` Next instead when the device reports an index beyond its track count (the iPhone does). More commands: `iap-sink ctl help`.
+`stereo` sends what the car stereo sends for the button, waits up to 6 s for the player to change, and prints the result, for example `playing | track 4/12 | Title - Artist | 0:42/3:15`. `playpause` sends end-fast-forward/rewind and then toggle. `next` sends `SetCurrentPlayingTrack(index + 1)` and end-fast-forward/rewind. It sends `PlayControl` Next instead when the device reports an index beyond its track count (the iPhone does). `back` copies the car (09/10/2026): 2 s or more into a track it sends toggle, `PlayControl` 0x04 (previous track), 1.2 s later `SetCurrentPlayingTrack` with the same index, end-fast-forward/rewind, and toggle again if the iPod is paused. Earlier in a track it sends `SetCurrentPlayingTrack(index - 1)`, wrapping to the end of the list at index 0. More commands: `iap-sink ctl help`.
 
 ## 1. What is reused from `oandrew/ipod`
 
@@ -34,7 +35,9 @@ ssh root@pi3-sink.local stereo next
    - The init queries (protocol versions, software version, extended interface mode, play status, track count, name).
    - `GetPlayStatus` every 0.6 s, track queries when the track changes.
    - One `AccessoryAck` for `TrackNewAudioAttributes`, 2.25 s after the first one.
+   - When the first `GetPlayStatus` says "stopped": `PlayCurrentSelection(0xFFFFFFFF)` and a `PlayControl` toggle, right after the first track count. The real stereo does this (seen in the car on 09/10/2026, not in `car-10`: the iPad was paused there).
 4. Presses play when the iPod is not playing (`IAP_AUTOPLAY=1`): end-fast-forward, then toggle, as the stereo does.
+5. Notes every error reply (`iPodAck` with a status other than success or pending). The real stereo shows one to the driver (`Error 2`, `Unsupported`). The notes are in the log and in `iap-sink ctl status` under `errors`. The `stereo` command prints them as `STEREO ERROR`.
 
 Checked against the capture: all 922 packets that the stereo sent in `car-10` re-encode byte for byte, and the certificate sections equal the captured packets.
 

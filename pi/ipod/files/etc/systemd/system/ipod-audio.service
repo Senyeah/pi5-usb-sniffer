@@ -5,7 +5,8 @@ Requires=ipod-gadget.service bluealsa.service
 BindsTo=ipod-gadget.service
 
 [Service]
-ExecStart=/usr/bin/bluealsa-aplay -S --profile-a2dp --volume=none --pcm=plughw:CARD=UAC1Gadget,DEV=0 --pcm-buffer-time=500000 --pcm-period-time=50000
+EnvironmentFile=-/etc/ipod-bridge.conf
+ExecStart=/usr/local/sbin/ipod-audio
 Restart=always
 RestartSec=2
 
